@@ -69,9 +69,11 @@ Authorization: Bearer <session.access_token>
 **API docs:**
 - ✅ `GET /docs` (Swagger), `GET /redoc` and `GET /openapi.json` work without a token.
 - Generating TypeScript types from `/openapi.json` is recommended, for example with `npx openapi-typescript http://localhost:8000/openapi.json -o src/types/api.ts`.
+- ✅ `GET /health` (no token) returns `{"status": "healthy"}`.
 
 **CORS:**
-- ✅ Only `http://localhost:3000` is allowed. Credentials are allowed, and all methods and headers.
+- ✅ By default `http://localhost:3000`, `http://localhost:5173`, `http://127.0.0.1:3000` and `http://127.0.0.1:5173` are allowed. Credentials are allowed, and all methods and headers.
+- Set the backend's `ALLOWED_ORIGINS` variable (comma-separated) to replace that list, e.g. for a deployed frontend.
 - Any other origin is rejected (the preflight returns `400`). A deployed frontend URL needs a backend change. ⏳
 
 **Formats:**
@@ -325,6 +327,27 @@ Errors to handle:
 
 ---
 
+## 6a. Customers (Vaidehi's module) — 🔴 UNRESOLVED SECURITY ISSUE
+
+> 🔴 **Unresolved:** on `develop`, `GET /customers/`, `GET /customers/{id}`, `POST /customers/` and `PATCH /customers/{id}` require **no authentication**. Anyone can list every customer's name, email and role, create customers or deactivate accounts. Only `POST /customers/staff` requires admin. Reported to the module owner; not fixed yet. Send the Bearer token anyway, because the contract will become authenticated.
+
+**Customer name lookup.** Subscriptions, invoices and payments return only `customer_id`. Fetch the list once and map `id → name`.
+
+| Method & path | Auth (current) | Returns |
+|---|---|---|
+| `GET /customers/` | 🔴 none | `Customer[]`. Query: `search` (partial name or email), `role` (`customer` / `staff` / `admin`), `is_active` (`true` / `false`). **No pagination:** returns every match |
+| `GET /customers/{id}` | 🔴 none | `Customer` (404 if missing) |
+| `POST /customers/` | 🔴 none | `201` `Customer` (`409` on duplicate email) |
+| `PATCH /customers/{id}` | 🔴 none | `Customer`. Body: `name`, `is_active` |
+| `POST /customers/staff` | admin | `201` `Customer` |
+
+- Use the trailing slash (`/customers/`). `/customers` answers with a 307 redirect, which can drop the `Authorization` header across origins.
+- **`Customer` fields:** `id`, `name`, `email`, `is_active`, `role`, `auth_user_id` (nullable), `created_at` (nullable).
+- **Validation:** `name` is 1–100 characters; `email` must match a basic email pattern and is stored lowercased; a duplicate email returns `409`.
+- ⚠️ The `customers` table definition isn't in the repository, so its live constraints are unverified.
+
+---
+
 ## 7. Screen-by-screen status
 
 **Dashboard (staff/admin):**
@@ -334,9 +357,9 @@ Errors to handle:
 | subscriptions | ✅ Section 4 |
 | invoices | ✅ Section 5 (including billing run and overdue marking) |
 | payments | ✅ Section 6 |
-| plans, taxes, discounts, products (variants) | ⏳ Not in this backend. Only on Vaidehi's **unmerged** branches, which use a spoofable `X-User-Role` header. Don't integrate yet |
-| customers, staff | ⏳ Not implemented. ⚠️ You need customer, plan and product lists to fill the subscription form's dropdowns, so for now use mocks or IDs |
-| quotation-templates | ⏳ Not implemented (subscriptions accept a `quotation_template_id`) |
+| plans, taxes, discounts, products (variants) | ✅ Merged into `develop` and registered (Vaidehi's modules: `/plans/`, `/taxes/`, `/discounts/`, `/variants/`). Their contracts aren't documented here; use `/docs`. `GET` on `/plans/` and `/variants/`, and `POST /discounts/validate`, currently require no token |
+| customers, staff | ✅ Exists, see Section 6a. 🔴 Unresolved: no authentication on the customer endpoints |
+| quotation-templates | ✅ Merged and registered (`/quotation-templates/`; `GET` requires no token). Contract: see `/docs` |
 | dunning | ⏳ Not implemented (`POST /invoices/mark-overdue` ✅ is the only building block) |
 | command-center, health-radar, leak-detective, reports, simulator | ⏳ Not implemented. No dashboard or metrics endpoints exist; for now, build summaries from the list endpoints |
 
@@ -361,7 +384,9 @@ Errors to handle:
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | Supabase project | in `.env.example` |
 | `SUPABASE_SERVICE_ROLE_KEY` | **backend only, never in the frontend** | in `.env.example` |
 | `NEXTAUTH_URL`, `NEXTAUTH_SECRET` | NextAuth | in `.env.example`. ⚠️ May be obsolete given the Supabase Auth decision |
-| `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_BACKEND_URL` | browser-side Next.js code | ⏳ **not defined yet.** Next.js only exposes `NEXT_PUBLIC_*` variables to the browser; the team needs to add these names |
+| `NEXT_PUBLIC_API_URL` | browser-side API base URL | Already read by the frontend code (`feat/seena-frontend`); ⏳ not yet in `.env.example` |
+| `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` | browser-side Supabase Auth | ⏳ **not defined yet.** Next.js only exposes `NEXT_PUBLIC_*` variables to the browser; the team needs to add these names |
+| `ALLOWED_ORIGINS` | backend CORS (comma-separated) | optional; defaults listed in Section 3 |
 | Supabase JWT verification config (`SUPABASE_JWT_SECRET` or JWKS URL) | backend | ⏳ not defined, pending the shared auth decision |
 
 Ask the team lead for the values; never commit them.
