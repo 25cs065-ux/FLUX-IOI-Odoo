@@ -91,7 +91,10 @@ def billing_run(
     repo: InvoiceRepository = Depends(get_invoice_repository),
 ):
     """Generates invoices for every active subscription with
-    `next_billing_date <= as_of`, catching up on missed periods. Safe to re-run."""
+    `next_billing_date <= as_of`, catching up on missed periods. Safe to re-run:
+    a period that already has an invoice is never billed again, and the
+    subscription is moved past it (`recovered`). A failing subscription is
+    reported in `failed` and does not stop the others."""
     with service_errors():
         return service.billing_run(repo, user, payload.as_of)
 

@@ -8,6 +8,7 @@ Status flow (database/remaining_schema.sql):
     sent / overdue -> partial -> paid       (driven by the Payments module)
 """
 import calendar
+import logging
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
@@ -31,6 +32,8 @@ from app.services.subscription_service import (
     price_line,
 )
 from app.services.tax_engine import money
+
+logger = logging.getLogger(__name__)
 
 MAX_PERIODS_PER_RUN = 36            # safety cap when catching up on missed periods
 CUSTOMER_HIDDEN_STATUSES = (I.DRAFT.value,)
@@ -143,11 +146,21 @@ def list_invoices(repo, user, *, status=None, customer_id=None, subscription_id=
 
 # ---------------------------------------------------------------- create
 
+class PeriodAlreadyInvoiced(ConflictError):
+    """The period has a live invoice. bill_subscription advances
+    next_billing_date past it before raising, so billing can continue."""
+
+    def __init__(self, invoice: Optional[dict] = None):
+        number = f" ({invoice['invoice_number']})" if invoice and invoice.get("invoice_number") else ""
+        super().__init__(f"This billing period has already been invoiced{number}")
+        self.invoice = invoice
+
+
 def _save(repo: InvoiceRepository, header: dict, lines: list[dict]) -> dict:
     try:
         inv = repo.insert_invoice(header)
     except DuplicateInvoiceError as exc:
-        raise ConflictError("This billing period has already been invoiced") from exc
+        raise PeriodAlreadyInvoiced() from exc
     try:
         saved = repo.insert_invoice_lines([{**l, "invoice_id": inv["id"]} for l in lines])
     except Exception:
@@ -203,14 +216,19 @@ def bill_subscription(repo: InvoiceRepository, sub: dict, user: CurrentUser, iss
     period_end = billing_period_end(anchor, period_start, plan.get("interval") or "monthly")
     if end:
         period_end = min(period_end, end)
-    if repo.find_live_invoice(sub["id"], period_start, period_end):
-        raise ConflictError("This billing period has already been invoiced")
+    existing = repo.find_live_invoice(sub["id"], period_start, period_end)
+    if existing:
+        # A previous run saved this invoice but stopped before advancing the
+        # subscription. Finish that step instead of getting stuck on this period.
+        _advance_billing_date(repo, sub, period_end, end)
+        raise PeriodAlreadyInvoiced(existing)
     rows = repo.list_lines(sub["id"])
     if not rows:
         raise ConflictError("Subscription has no lines to invoice")
 
     lines = lines_from_subscription(repo, rows)
-    inv = _save(repo, {
+    try:
+        inv = _save(repo, {
         "customer_id": sub["customer_id"],
         "subscription_id": sub["id"],
         "payment_terms_id": sub.get("payment_terms_id"),
@@ -219,17 +237,29 @@ def bill_subscription(repo: InvoiceRepository, sub: dict, user: CurrentUser, iss
         "due_date": due_date_for(repo, issue_date, sub.get("payment_terms_id")),
         "billing_period_start": period_start,
         "billing_period_end": period_end,
-        "currency": sub.get("currency") or "INR",
-        "created_by": user.id,
-        **invoice_totals(lines),
-    }, lines)
+            "currency": sub.get("currency") or "INR",
+            "created_by": user.id,
+            **invoice_totals(lines),
+        }, lines)
+    except PeriodAlreadyInvoiced:
+        # Lost a race with a concurrent run (uix_invoice_live_period).
+        _advance_billing_date(repo, sub, period_end, end)
+        raise
 
+    # If this fails the invoice stays valid; the next run finds it via
+    # find_live_invoice and advances the date then.
+    _advance_billing_date(repo, sub, period_end, end)
+    return inv
+
+
+def _advance_billing_date(repo: InvoiceRepository, sub: dict, period_end: date, end: Optional[date]) -> None:
+    """Move next_billing_date past period_end. Idempotent: every caller
+    for the same period writes the same value."""
     next_start = period_end + timedelta(days=1)
     repo.update_subscription(sub["id"], {
         "next_billing_date": None if end and next_start > end else next_start,
         "updated_at": _now(),
     }, expected_status="active")
-    return inv
 
 
 def generate_invoice(repo, subscription_id: UUID, user, issue_date: Optional[date] = None) -> dict:
@@ -241,21 +271,34 @@ def generate_invoice(repo, subscription_id: UUID, user, issue_date: Optional[dat
 
 def billing_run(repo: InvoiceRepository, user: CurrentUser, as_of: Optional[date] = None) -> dict:
     """Invoice every active subscription whose next billing date has arrived,
-    catching up on missed periods. Failures are reported, not raised."""
+    catching up on missed periods. One subscription's problem never stops the
+    run: business-rule refusals are reported as skipped, unexpected errors as
+    failed, and periods that were already invoiced as recovered."""
     as_of = as_of or date.today()
-    created, skipped = [], []
+    result = {"created": [], "recovered": [], "skipped": [], "failed": []}
     for sub in repo.list_billable_subscriptions(as_of):
-        for _ in range(MAX_PERIODS_PER_RUN):
-            try:
-                created.append(bill_subscription(repo, sub, user, as_of))
-            except SubscriptionError as exc:
-                skipped.append({"subscription_id": sub["id"], "reason": exc.detail})
-                break
-            sub = repo.get_subscription(sub["id"])
-            next_date = _date(sub.get("next_billing_date")) if sub else None
-            if next_date is None or next_date > as_of:
-                break
-    return {"created": created, "skipped": skipped}
+        try:
+            _bill_until(repo, sub, user, as_of, result)
+        except Exception as exc:
+            logger.exception("Billing run failed for subscription %s", sub["id"])
+            result["failed"].append({"subscription_id": sub["id"],
+                                     "reason": f"{type(exc).__name__}: {exc}"[:300]})
+    return result
+
+
+def _bill_until(repo, sub: dict, user, as_of: date, result: dict) -> None:
+    for _ in range(MAX_PERIODS_PER_RUN):
+        try:
+            result["created"].append(bill_subscription(repo, sub, user, as_of))
+        except PeriodAlreadyInvoiced as exc:
+            result["recovered"].append({"subscription_id": sub["id"], "reason": exc.detail})
+        except SubscriptionError as exc:
+            result["skipped"].append({"subscription_id": sub["id"], "reason": exc.detail})
+            return
+        sub = repo.get_subscription(sub["id"])
+        next_date = _date(sub.get("next_billing_date")) if sub else None
+        if next_date is None or next_date > as_of:
+            return
 
 
 # ---------------------------------------------------------------- update

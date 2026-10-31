@@ -137,14 +137,18 @@ class InvoiceDetail(InvoiceSummary):
     lines: List[InvoiceLineResponse] = []
 
 
-class BillingRunSkip(BaseModel):
+class BillingRunIssue(BaseModel):
     subscription_id: UUID
     reason: str
 
 
 class BillingRunResult(BaseModel):
     created: List[InvoiceSummary]
-    skipped: List[BillingRunSkip]
+    recovered: List[BillingRunIssue] = Field(
+        description="Periods already invoiced by an earlier, interrupted run; next_billing_date was advanced")
+    skipped: List[BillingRunIssue] = Field(description="Refused by a business rule (e.g. no lines to invoice)")
+    failed: List[BillingRunIssue] = Field(
+        description="Unexpected errors; the run continued with the other subscriptions")
 
 
 class OverdueRunResult(BaseModel):

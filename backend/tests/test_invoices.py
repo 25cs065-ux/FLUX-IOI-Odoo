@@ -205,7 +205,7 @@ def test_billing_run_catches_up_and_is_idempotent(client, repo):
     assert future["id"] and draft["id"]
 
     again = client.post("/invoices/billing-run").json()
-    assert again == {"created": [], "skipped": []}
+    assert again == {"created": [], "recovered": [], "skipped": [], "failed": []}
 
 
 def test_billing_run_as_of_future_date(client, repo):
@@ -388,6 +388,106 @@ def test_openapi_documents_invoice_endpoints():
                  "/invoices/{invoice_id}", "/invoices/{invoice_id}/send",
                  "/invoices/{invoice_id}/cancel", "/invoices/{invoice_id}/void"]:
         assert path in paths, path
+
+
+# ---------------------------------------------------------------- billing run recovery
+
+def fail_next_subscription_update(repo):
+    """Make the next update_subscription call raise, like a dropped connection."""
+    original = repo.update_subscription
+
+    def failing(*args, **kwargs):
+        repo.update_subscription = original
+        raise RuntimeError("connection reset while advancing next_billing_date")
+
+    repo.update_subscription = failing
+
+
+def test_billing_run_recovers_when_advancing_next_billing_date_failed(client, repo):
+    sub = active_sub(client, repo)
+    fail_next_subscription_update(repo)
+
+    first = client.post("/invoices/billing-run").json()
+    assert len(first["created"]) == 0 and len(repo.invoices) == 1        # invoice saved, date not advanced
+    assert [f["subscription_id"] for f in first["failed"]] == [sub["id"]]
+    assert "RuntimeError" in first["failed"][0]["reason"]
+    assert repo.get_subscription(sub["id"])["next_billing_date"] == TODAY.isoformat()
+
+    second = client.post("/invoices/billing-run").json()
+    assert second["created"] == [] and second["failed"] == [] and second["skipped"] == []
+    [recovered] = second["recovered"]
+    invoice = next(iter(repo.invoices.values()))
+    assert recovered["subscription_id"] == sub["id"] and invoice["invoice_number"] in recovered["reason"]
+    assert len(repo.invoices) == 1                                       # no duplicate
+    assert repo.get_subscription(sub["id"])["next_billing_date"] ==         (date.fromisoformat(invoice["billing_period_end"]) + timedelta(days=1)).isoformat()
+
+    third = client.post("/invoices/billing-run").json()
+    assert third == {"created": [], "recovered": [], "skipped": [], "failed": []}
+
+
+def test_recovery_continues_with_later_missed_periods(client, repo):
+    sub = active_sub(client, repo, start_date=(TODAY - timedelta(days=40)).isoformat())
+    fail_next_subscription_update(repo)
+    client.post("/invoices/billing-run")
+    assert len(repo.invoices) == 1
+
+    res = client.post("/invoices/billing-run").json()
+    assert len(res["recovered"]) == 1 and len(res["created"]) == 1      # first period recovered, second billed
+    periods = sorted((i["billing_period_start"], i["billing_period_end"]) for i in repo.invoices.values())
+    assert len(periods) == 2 and periods[0][1] < periods[1][0]           # consecutive, no overlap
+    assert repo.get_subscription(sub["id"])["next_billing_date"] > TODAY.isoformat()
+
+
+def test_generate_endpoint_also_recovers(client, repo):
+    sub = active_sub(client, repo)
+    fail_next_subscription_update(repo)
+    with pytest.raises(RuntimeError):
+        generate(client, sub["id"])
+    stuck = generate(client, sub["id"])
+    assert stuck.status_code == 409 and "INV-" in stuck.json()["detail"]
+    nxt = generate(client, sub["id"])                                    # bills the following period
+    assert nxt.status_code == 201 and nxt.json()["billing_period_start"] > TODAY.isoformat()
+    assert len(repo.invoices) == 2
+
+
+def test_concurrent_run_hitting_unique_index_advances_and_recovers(client, repo):
+    sub = active_sub(client, repo)
+    generate(client, sub["id"])
+    repo.subscriptions[sub["id"]]["next_billing_date"] = TODAY.isoformat()   # other run hasn't advanced yet
+    original, calls = repo.find_live_invoice, {"n": 0}
+
+    def stale_first_read(*args):        # our pre-check misses the other run's invoice
+        calls["n"] += 1
+        return None if calls["n"] == 1 else original(*args)
+
+    repo.find_live_invoice = stale_first_read
+    res = client.post("/invoices/billing-run").json()
+    assert len(res["recovered"]) == 1 and res["created"] == [] and res["failed"] == []
+    assert len(repo.invoices) == 1
+    assert repo.get_subscription(sub["id"])["next_billing_date"] > TODAY.isoformat()
+
+
+def test_one_failing_subscription_does_not_stop_the_run(client, repo):
+    good_a = active_sub(client, repo)
+    broken = active_sub(client, repo)
+    no_lines = active_sub(client, repo)
+    good_b = active_sub(client, repo)
+    repo.lines = {k: v for k, v in repo.lines.items() if v["subscription_id"] != no_lines["id"]}
+    original = repo.list_lines
+
+    def list_lines(subscription_id):
+        if str(subscription_id) == broken["id"]:
+            raise RuntimeError("timeout reading subscription_lines")
+        return original(subscription_id)
+
+    repo.list_lines = list_lines
+    res = client.post("/invoices/billing-run")
+    assert res.status_code == 200
+    body = res.json()
+    assert {i["subscription_id"] for i in body["created"]} == {good_a["id"], good_b["id"]}
+    assert [(f["subscription_id"], "timeout" in f["reason"]) for f in body["failed"]] == [(broken["id"], True)]
+    assert [s["subscription_id"] for s in body["skipped"]] == [no_lines["id"]]
+    assert repo.get_subscription(broken["id"])["next_billing_date"] == TODAY.isoformat()   # retried next run
 
 
 # ---------------------------------------------------------------- schema contract
