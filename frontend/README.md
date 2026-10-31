@@ -1,36 +1,46 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Brightloop Frontend
 
-## Getting Started
+Next.js (App Router) frontend for the Brightloop Subscription Platform, built with Tailwind CSS and shadcn/ui. Authentication uses NextAuth.js, which calls the FastAPI backend for login and issues the session token.
 
-First, run the development server:
+## Run locally
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+App: http://localhost:3000
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+The backend must be running at the URL set in `BACKEND_URL` (default `http://127.0.0.1:8000`).
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Environment variables
 
-## Learn More
+Create `frontend/.env.local`:
 
-To learn more about Next.js, take a look at the following resources:
+```
+NEXTAUTH_URL=http://localhost:3000
+NEXTAUTH_SECRET=<any long random string>
+BACKEND_URL=http://127.0.0.1:8000
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Structure
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```
+src/
+├── app/
+│   ├── (auth)/         login, register, password reset, email verification
+│   ├── (dashboard)/    admin and staff screens
+│   └── (portal)/       customer portal
+├── components/         layout, shared components, shadcn/ui
+├── lib/                api client, auth config, validators
+├── hooks/
+└── types/
+```
 
-## Deploy on Vercel
+## Build check
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+npm run build
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+See the root `README.md` for full project setup, features and team.
