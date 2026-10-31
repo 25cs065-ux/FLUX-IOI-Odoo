@@ -1,118 +1,206 @@
+"""Change requests API against an in-memory repository shaped like the live table."""
+import uuid
+from datetime import datetime, timezone
+
 import pytest
-from unittest.mock import patch, MagicMock
-from pydantic import ValidationError
 from fastapi.testclient import TestClient
-from fastapi import FastAPI
-from app.schemas.change_request import (
-    ChangeRequestCreate,
-    ChangeRequestUpdate,
-    ChangeRequestStatus
-)
-from app.routers.change_requests import router as change_requests_router
-from app.core.auth import get_current_user, require_admin
 
-test_app = FastAPI()
-test_app.include_router(change_requests_router)
-client = TestClient(test_app)
+from app.core.current_user import CurrentUser, Role, get_current_user
+from app.main import app
+from app.repositories.change_request_repository import get_change_request_repository
 
-DUMMY_UUID = "00000000-0000-0000-0000-000000000000"
+# Columns of the live public.change_requests table.
+LIVE_COLUMNS = {"id", "customer_id", "subscription_id", "request_type", "details", "status",
+                "created_at", "updated_at"}
 
-def test_valid_change_request_creation_schema():
-    cr = ChangeRequestCreate(
-        quotation_id="qt-001",
-        reason="Need 2 extra licenses added",
-        proposed_changes={"quantity": 5}
-    )
-    assert cr.quotation_id == "qt-001"
-    assert cr.reason == "Need 2 extra licenses added"
+ADMIN = CurrentUser(id=uuid.uuid4(), role=Role.ADMIN)
+STAFF = CurrentUser(id=uuid.uuid4(), role=Role.STAFF)
+CUSTOMER = CurrentUser(id=uuid.uuid4(), role=Role.CUSTOMER)
+OTHER_CUSTOMER = CurrentUser(id=uuid.uuid4(), role=Role.CUSTOMER)
+UNLINKED_CUSTOMER = CurrentUser(id=uuid.uuid4(), role=Role.CUSTOMER)
 
-def test_short_reason_fails():
-    with pytest.raises(ValidationError):
-        ChangeRequestCreate(
-            quotation_id="qt-001",
-            reason="Tiny"
-        )
 
-def test_reject_status_without_reason_fails():
-    with pytest.raises(ValidationError):
-        ChangeRequestUpdate(
-            status=ChangeRequestStatus.REJECTED,
-            rejection_reason=""
-        )
+class FakeChangeRequestRepository:
+    def __init__(self):
+        self.customers, self.subscriptions, self.requests = {}, {}, {}
 
-def test_reject_status_with_valid_reason_passes():
-    update = ChangeRequestUpdate(
-        status=ChangeRequestStatus.REJECTED,
-        rejection_reason="Item is out of stock in regional warehouse"
-    )
-    assert update.status == ChangeRequestStatus.REJECTED
+    def add_customer(self, auth_user_id, is_active=True):
+        row = {"id": str(uuid.uuid4()), "auth_user_id": str(auth_user_id), "is_active": is_active}
+        self.customers[row["id"]] = row
+        return row
 
-def test_unauthenticated_requests_blocked():
-    assert client.get("/change-requests/").status_code == 401
-    assert client.get(f"/change-requests/{DUMMY_UUID}").status_code == 401
-    assert client.post("/change-requests/", json={"quotation_id": "q1", "reason": "Need changes"}).status_code == 401
-    assert client.patch(f"/change-requests/{DUMMY_UUID}", json={"status": "approved"}).status_code == 401
+    def add_subscription(self, customer_id):
+        row = {"id": str(uuid.uuid4()), "customer_id": customer_id}
+        self.subscriptions[row["id"]] = row
+        return row
 
-def test_customer_cannot_view_other_user_request():
-    test_app.dependency_overrides[get_current_user] = lambda: {"id": "user-A", "email": "a@test.com", "role": "customer"}
-    with patch("app.routers.change_requests.supabase") as mock_sb:
-        mock_sb.table.return_value.select.return_value.eq.return_value.execute.return_value.data = [{
-            "id": DUMMY_UUID,
-            "quotation_id": "qt-001",
-            "requested_by": "user-B",
-            "reason": "Need 2 extra licenses added",
-            "proposed_changes": {"quantity": 5},
-            "status": "pending",
-            "created_at": "2026-10-31T00:00:00Z",
-            "updated_at": "2026-10-31T00:00:00Z"
-        }]
-        res = client.get(f"/change-requests/{DUMMY_UUID}")
-        assert res.status_code == 403
-    test_app.dependency_overrides.clear()
+    def get_customer(self, customer_id):
+        return self.customers.get(str(customer_id))
 
-def test_status_update_blocks_customer():
-    test_app.dependency_overrides[get_current_user] = lambda: {"id": "c1", "email": "c@test.com", "role": "customer"}
-    try:
-        res = client.patch(f"/change-requests/{DUMMY_UUID}", json={"status": "approved", "reviewer_notes": "ok"})
-        assert res.status_code == 403
-    finally:
-        test_app.dependency_overrides.clear()
+    def get_customer_by_auth_user(self, auth_user_id):
+        return next((c for c in self.customers.values() if c["auth_user_id"] == str(auth_user_id)), None)
 
-@patch("app.routers.change_requests.supabase")
-def test_status_update_permits_admin_and_sets_reviewed_by(mock_supabase):
-    admin_data = {"id": "admin-999", "email": "admin@test.com", "role": "admin"}
-    test_app.dependency_overrides[get_current_user] = lambda: admin_data
-    test_app.dependency_overrides[require_admin] = lambda: admin_data
+    def get_subscription(self, subscription_id):
+        return self.subscriptions.get(str(subscription_id))
 
-    mock_record = {
-        "id": DUMMY_UUID,
-        "quotation_id": "qt-001",
-        "requested_by": "usr-123",
-        "reason": "Need 2 extra licenses added",
-        "proposed_changes": {"quantity": 5},
-        "status": "pending",
-        "created_at": "2026-10-31T00:00:00Z",
-        "updated_at": "2026-10-31T00:00:00Z"
-    }
+    def get_request(self, request_id):
+        return self.requests.get(str(request_id))
 
-    mock_updated_record = {
-        **mock_record,
-        "status": "under_review",
-        "reviewer_notes": "Reviewing now",
-        "reviewed_by": "admin-999"
-    }
+    def list_requests(self, *, customer_id=None, subscription_id=None, status=None, limit=50, offset=0):
+        rows = [r for r in self.requests.values()
+                if (customer_id is None or r["customer_id"] == str(customer_id))
+                and (subscription_id is None or r["subscription_id"] == str(subscription_id))
+                and (status is None or r["status"] == status)]
+        rows.sort(key=lambda r: r["created_at"], reverse=True)
+        return rows[offset:offset + limit]
 
-    mock_table = MagicMock()
-    mock_table.select.return_value.eq.return_value.execute.return_value.data = [mock_record]
-    mock_table.update.return_value.eq.return_value.execute.return_value.data = [mock_updated_record]
-    mock_supabase.table.return_value = mock_table
+    def insert_request(self, data):
+        assert set(data) <= LIVE_COLUMNS, set(data) - LIVE_COLUMNS
+        now = datetime.now(timezone.utc).isoformat()
+        row = {"id": str(uuid.uuid4()), "created_at": now, "updated_at": now, "details": None,
+               "subscription_id": None, "status": "pending"}
+        row.update({k: (str(v) if isinstance(v, uuid.UUID) else v) for k, v in data.items()})
+        self.requests[row["id"]] = row
+        return dict(row)
 
-    try:
-        payload = {"status": "under_review", "reviewer_notes": "Reviewing now"}
-        res = client.patch(f"/change-requests/{DUMMY_UUID}", json=payload)
-        assert res.status_code == 200
-        assert res.json()["status"] == "under_review"
-        called_update_payload = mock_table.update.call_args[0][0]
-        assert called_update_payload["reviewed_by"] == "admin-999"
-    finally:
-        test_app.dependency_overrides.clear()
+    def update_request(self, request_id, data):
+        assert set(data) <= LIVE_COLUMNS, set(data) - LIVE_COLUMNS
+        row = self.requests.get(str(request_id))
+        if row:
+            row.update({k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in data.items()})
+        return dict(row) if row else None
+
+
+@pytest.fixture
+def repo():
+    r = FakeChangeRequestRepository()
+    r.customer = r.add_customer(CUSTOMER.id)
+    r.other = r.add_customer(OTHER_CUSTOMER.id)
+    r.sub = r.add_subscription(r.customer["id"])
+    r.other_sub = r.add_subscription(r.other["id"])
+    return r
+
+
+@pytest.fixture
+def client(repo):
+    state = {"user": CUSTOMER}
+    app.dependency_overrides[get_change_request_repository] = lambda: repo
+    app.dependency_overrides[get_current_user] = lambda: state["user"]
+
+    class Client(TestClient):
+        def as_user(self, user):
+            state["user"] = user
+            return self
+
+    yield Client(app)
+    app.dependency_overrides.clear()
+
+
+def body(**overrides):
+    data = {"request_type": "upgrade", "details": "Please move us to the annual plan"}
+    data.update(overrides)
+    return data
+
+
+# ---------------------------------------------------------------- create
+
+def test_customer_creates_request_for_own_subscription(client, repo):
+    res = client.post("/change-requests/", json=body(subscription_id=repo.sub["id"]))
+    assert res.status_code == 201, res.text
+    data = res.json()
+    assert data["customer_id"] == repo.customer["id"]
+    assert data["subscription_id"] == repo.sub["id"]
+    assert data["status"] == "pending" and data["request_type"] == "upgrade"
+
+
+def test_customer_cannot_choose_another_customer(client, repo):
+    res = client.post("/change-requests/", json=body(customer_id=repo.other["id"]))
+    assert res.status_code == 201
+    assert res.json()["customer_id"] == repo.customer["id"]      # always their own
+
+
+def test_customer_cannot_use_someone_elses_subscription(client, repo):
+    res = client.post("/change-requests/", json=body(subscription_id=repo.other_sub["id"]))
+    assert res.status_code == 422
+    assert not repo.requests
+
+
+def test_customer_without_customer_record_is_refused(client):
+    assert client.as_user(UNLINKED_CUSTOMER).post("/change-requests/", json=body()).status_code == 403
+
+
+def test_staff_must_name_an_active_customer(client, repo):
+    client.as_user(STAFF)
+    assert client.post("/change-requests/", json=body()).status_code == 422
+    assert client.post("/change-requests/", json=body(customer_id=str(uuid.uuid4()))).status_code == 422
+    res = client.post("/change-requests/", json=body(customer_id=repo.other["id"],
+                                                     subscription_id=repo.other_sub["id"]))
+    assert res.status_code == 201
+    assert res.json()["customer_id"] == repo.other["id"]
+
+
+@pytest.mark.parametrize("bad", [
+    {"request_type": "teleport"},
+    {"details": "too short"},
+    {"reason": "unknown field from the old schema"},
+])
+def test_invalid_payloads_rejected(client, bad):
+    assert client.post("/change-requests/", json=body(**bad)).status_code == 422
+
+
+# ---------------------------------------------------------------- read
+
+def test_list_is_scoped_for_customers_and_complete_for_staff(client, repo):
+    client.post("/change-requests/", json=body())
+    client.as_user(OTHER_CUSTOMER).post("/change-requests/", json=body(request_type="downgrade"))
+
+    mine = client.as_user(CUSTOMER).get("/change-requests/").json()
+    assert [r["customer_id"] for r in mine] == [repo.customer["id"]]
+    # A customer cannot widen the list with customer_id.
+    assert len(client.get(f"/change-requests/?customer_id={repo.other['id']}").json()) == 1
+
+    assert len(client.as_user(STAFF).get("/change-requests/").json()) == 2
+    assert len(client.get("/change-requests/?status=pending").json()) == 2
+    assert client.get("/change-requests/?status=approved").json() == []
+    assert len(client.get(f"/change-requests/?customer_id={repo.other['id']}").json()) == 1
+
+
+def test_unlinked_customer_gets_empty_list(client):
+    res = client.as_user(UNLINKED_CUSTOMER).get("/change-requests/")
+    assert res.status_code == 200 and res.json() == []
+
+
+def test_customer_cannot_read_another_customers_request(client, repo):
+    other_id = client.as_user(OTHER_CUSTOMER).post("/change-requests/", json=body()).json()["id"]
+    assert client.as_user(CUSTOMER).get(f"/change-requests/{other_id}").status_code == 404
+    assert client.as_user(STAFF).get(f"/change-requests/{other_id}").status_code == 200
+
+
+def test_bad_or_missing_ids(client):
+    assert client.get("/change-requests/not-a-uuid").status_code == 422
+    assert client.get(f"/change-requests/{uuid.uuid4()}").status_code == 404
+
+
+# ---------------------------------------------------------------- status changes
+
+def test_only_admin_changes_status_and_terminal_states_are_final(client):
+    request_id = client.post("/change-requests/", json=body()).json()["id"]
+    assert client.patch(f"/change-requests/{request_id}", json={"status": "approved"}).status_code == 403
+    assert client.as_user(STAFF).patch(f"/change-requests/{request_id}",
+                                       json={"status": "approved"}).status_code == 403
+
+    client.as_user(ADMIN)
+    res = client.patch(f"/change-requests/{request_id}", json={"status": "under_review"})
+    assert res.status_code == 200 and res.json()["status"] == "under_review"
+    assert client.patch(f"/change-requests/{request_id}", json={"status": "approved"}).status_code == 200
+    assert client.patch(f"/change-requests/{request_id}", json={"status": "pending"}).status_code == 409
+    assert client.patch(f"/change-requests/{request_id}", json={"status": "bogus"}).status_code == 422
+    assert client.patch(f"/change-requests/{uuid.uuid4()}", json={"status": "approved"}).status_code == 404
+
+
+def test_requires_a_token():
+    app.dependency_overrides.clear()
+    anon = TestClient(app)
+    assert anon.get("/change-requests/").status_code == 401
+    assert anon.post("/change-requests/", json=body()).status_code == 401
+    assert anon.patch(f"/change-requests/{uuid.uuid4()}", json={"status": "approved"}).status_code == 401

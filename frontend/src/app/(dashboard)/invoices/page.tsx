@@ -6,10 +6,8 @@ import {
   CheckCircle2,
   AlertCircle,
   Clock,
-  DollarSign,
   Eye,
   Send,
-  Printer,
   X,
   RefreshCw,
   Plus,
@@ -94,7 +92,7 @@ const STATUS_FILTER_OPTIONS: { label: string; value: InvStatus | "all" }[] = [
 ];
 
 // Backend-aligned actions. "confirm" is replaced by "send" (draft → sent).
-type ActionKind = "send" | "cancel" | "void" | "print";
+type ActionKind = "send" | "cancel" | "void";
 
 interface PendingAction {
   kind: ActionKind;
@@ -138,13 +136,6 @@ const ACTION_CONFIG: Record<
     destructive: true,
     needsConfirm: true,
     endpoint: "void",
-  },
-  print: {
-    title: "Print / download",
-    description: (n) => `Download a PDF copy of ${n}.`,
-    confirmLabel: "Download PDF",
-    destructive: false,
-    needsConfirm: false,
   },
 };
 
@@ -313,12 +304,6 @@ export default function InvoicesPage() {
 
   // ── Mutations ────────────────────────────────────────────────────────────
   async function applyAction(kind: ActionKind, id: string) {
-    if (kind === "print") {
-      alert("PDF download is not available yet.");
-      setPendingAction(null);
-      return;
-    }
-
     setActionLoading(true);
     setActionError(null);
 
@@ -609,7 +594,6 @@ function InvoiceDrawer({ invoice, detail, onClose, onAction, onSaveNotes }: Invo
       case "draft": return ["send", "cancel"];
       case "sent":
       case "overdue": return ["void"];
-      case "paid": return ["print"];
       default: return [];
     }
   })();
@@ -618,7 +602,6 @@ function InvoiceDrawer({ invoice, detail, onClose, onAction, onSaveNotes }: Invo
     send: <Send className="size-3.5" />,
     cancel: <X className="size-3.5" />,
     void: <X className="size-3.5" />,
-    print: <Printer className="size-3.5" />,
   };
 
   const total = decimalToMinorUnits(invoice.totalAmount);
@@ -747,11 +730,6 @@ function InvoiceDrawer({ invoice, detail, onClose, onAction, onSaveNotes }: Invo
                 </label>
               </>
             ) : <p className="text-sm text-muted-foreground">Loading invoice details…</p>}
-
-            <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-              <DollarSign className="size-3.5 shrink-0" />
-              PDF download is not yet implemented on the backend.
-            </div>
           </div>
 
           {/* Footer actions */}

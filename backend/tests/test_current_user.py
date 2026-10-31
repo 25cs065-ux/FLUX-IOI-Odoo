@@ -516,3 +516,43 @@ def test_rejected_tokens_are_not_cached(client, env):
     env.team_override = None
     assert call(client, token).status_code == 200
     assert env.team_calls == 2
+
+
+def test_team_auth_caches_resolved_users_per_token(monkeypatch):
+    """The shared dependency resolves a token once per USER_CACHE_SECONDS, never caching failures."""
+    import types
+
+    from fastapi import HTTPException
+    from fastapi.security import HTTPAuthorizationCredentials
+
+    import app.core.auth as team_auth
+
+    calls = []
+    user = types.SimpleNamespace(id="u-1", email="u@example.com", app_metadata={"role": "staff"})
+
+    def get_user(token):
+        calls.append(token)
+        if token == "bad":
+            raise RuntimeError("invalid JWT")
+        return types.SimpleNamespace(user=user)
+
+    monkeypatch.setattr(team_auth.supabase.auth, "get_user", get_user)
+    table = types.SimpleNamespace(execute=lambda: types.SimpleNamespace(data=[]))
+    table.select = table.eq = table.is_ = lambda *a, **k: table
+    monkeypatch.setattr(team_auth.supabase, "table", lambda name: table)
+
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="good")
+    first = team_auth.get_current_user(creds)
+    first["role"] = "admin"                            # callers cannot poison the cache
+    assert team_auth.get_current_user(creds)["role"] == "staff"
+    assert calls == ["good"]
+
+    bad = HTTPAuthorizationCredentials(scheme="Bearer", credentials="bad")
+    for _ in range(2):
+        with pytest.raises(HTTPException):
+            team_auth.get_current_user(bad)
+    assert calls == ["good", "bad", "bad"]
+
+    monkeypatch.setattr(team_auth.time, "time", lambda: 10**10)   # cache expired
+    team_auth.get_current_user(creds)
+    assert calls[-1] == "good" and len(calls) == 4

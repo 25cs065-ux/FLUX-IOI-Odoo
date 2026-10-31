@@ -16,7 +16,7 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "cn";
-import { supabase } from "@/lib/supabase";
+import { RoleGuard, signOut, useSignedInUser } from "./RoleGuard";
 
 // ---------------------------------------------------------------------------
 // Portal navigation items — customer-facing only, no admin routes
@@ -51,8 +51,7 @@ function SidebarContent({
   const router = useRouter();
 
   async function handleLogout() {
-    await supabase.auth.signOut();
-    router.replace("/login");
+    await signOut(router);
   }
 
   return (
@@ -160,6 +159,15 @@ interface PortalLayoutShellProps {
 }
 
 export function PortalLayoutShell({ children }: PortalLayoutShellProps) {
+  return (
+    <RoleGuard>
+      <PortalShell>{children}</PortalShell>
+    </RoleGuard>
+  );
+}
+
+function PortalShell({ children }: PortalLayoutShellProps) {
+  const user = useSignedInUser();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const pathname = usePathname();
@@ -217,11 +225,10 @@ export function PortalLayoutShell({ children }: PortalLayoutShellProps) {
           <h1 className="flex-1 text-sm font-semibold text-foreground truncate">
             {pageTitle}
           </h1>
-          {/* Demo customer badge */}
-          <span className="flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground">
-            <UserCircle className="size-3.5" aria-hidden="true" />
-            Initech Ltd
-            <span className="text-muted-foreground/50">· Demo</span>
+          {/* Signed-in customer */}
+          <span className="flex max-w-[50%] items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground">
+            <UserCircle className="size-3.5 shrink-0" aria-hidden="true" />
+            <span className="truncate">{user?.name || user?.email}</span>
           </span>
         </header>
 

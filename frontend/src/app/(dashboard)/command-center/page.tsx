@@ -216,7 +216,7 @@ function calculateDashboard(
     overdue,
     overdueCount: overdueInvoices.length,
     collected,
-    customerCount: customers.length,
+    customerCount: customers.filter((customer) => customer.role === "customer").length,
     subscriptionStatuses: [...statusCounts].map(([status, count]) => ({ status, count })),
     months: monthlyData,
     recentPayments,

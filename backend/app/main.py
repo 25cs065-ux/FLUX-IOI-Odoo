@@ -52,6 +52,12 @@ try:
 except ImportError:
     pass
 
+try:
+    from app.routers.me import router as me_router
+    app.include_router(me_router)
+except ImportError:
+    pass
+
 # Feature routers
 try:
     from app.routers.plans import router as plans_router
