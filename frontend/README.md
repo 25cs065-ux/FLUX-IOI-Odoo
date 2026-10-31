@@ -1,46 +1,32 @@
-# Brightloop Frontend
+# Brightloop Subscription Platform
 
 Next.js (App Router) frontend for the Brightloop Subscription Platform, built with Tailwind CSS and shadcn/ui. Authentication uses NextAuth.js, which calls the FastAPI backend for login and issues the session token.
+
+---
+
+## Demo Accounts
+
+Use these pre-seeded credentials to log in (Password for all accounts: `Test@1234`):
+
+* **Admin:** `admin@seed.brightloop.test`
+* **Staff 1:** `staff1@seed.brightloop.test`
+* **Staff 2:** `staff2@seed.brightloop.test`
+
+---
+
+## Seed Scenarios
+
+| Seed Case | Description |
+| :--- | :--- |
+| **Overdue Invoice** | Past invoice planted with overdue status. |
+| **Partially Paid Invoice** | Past invoice planted with partial payment. |
+| **Expired Discount** | Exists in data, used by the planned Leak Detective. |
+| **Current Period Invoices** | 20 active subscriptions with no invoice for the current period (ready for live billing demo). |
+
+---
 
 ## Run locally
 
 ```bash
 npm install
 npm run dev
-```
-
-App: http://localhost:3000
-
-The backend must be running at the URL set in `BACKEND_URL` (default `http://127.0.0.1:8000`).
-
-## Environment variables
-
-Create `frontend/.env.local`:
-
-```
-NEXTAUTH_URL=http://localhost:3000
-NEXTAUTH_SECRET=<any long random string>
-BACKEND_URL=http://127.0.0.1:8000
-```
-
-## Structure
-
-```
-src/
-├── app/
-│   ├── (auth)/         login, register, password reset, email verification
-│   ├── (dashboard)/    admin and staff screens
-│   └── (portal)/       customer portal
-├── components/         layout, shared components, shadcn/ui
-├── lib/                api client, auth config, validators
-├── hooks/
-└── types/
-```
-
-## Build check
-
-```bash
-npm run build
-```
-
-See the root `README.md` for full project setup, features and team.
