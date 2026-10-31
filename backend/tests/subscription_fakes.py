@@ -17,6 +17,10 @@ class FakeSubscriptionRepository:
         self.subscriptions, self.lines, self.history = {}, {}, []
         self._seq = 100
         self.fail_line_insert = False
+        self.writes = []            # (table, op, keys) for schema contract tests
+
+    def _record(self, table, op, data):
+        self.writes.append((table, op, set(data)))
 
     # ---- seed helpers
     def add(self, table: dict, **row) -> dict:
@@ -68,6 +72,7 @@ class FakeSubscriptionRepository:
         return self._get(self.subscriptions, subscription_id)
 
     def insert_subscription(self, data):
+        self._record("subscriptions", "insert", data)
         now = datetime.now(timezone.utc).isoformat()
         row = {
             "id": new_id(), "subscription_number": f"SUB-{self._seq:06d}", "quotation_number": None,
@@ -79,6 +84,7 @@ class FakeSubscriptionRepository:
         return copy.deepcopy(row)
 
     def update_subscription(self, subscription_id, data, expected_status=None):
+        self._record("subscriptions", "update", data)
         row = self.subscriptions.get(str(subscription_id))
         if not row or (expected_status and row["status"] != expected_status):
             return None
@@ -101,6 +107,7 @@ class FakeSubscriptionRepository:
             raise RuntimeError("simulated database failure")
         out = []
         for line in lines:
+            self._record("subscription_lines", "insert", line)
             row = {"id": new_id(), "created_at": None, "updated_at": None, **to_row(line)}
             self.lines[row["id"]] = row
             out.append(copy.deepcopy(row))
@@ -110,6 +117,7 @@ class FakeSubscriptionRepository:
         self.lines = {k: v for k, v in self.lines.items() if v["subscription_id"] != str(subscription_id)}
 
     def insert_history(self, entry):
+        self._record("subscription_status_history", "insert", entry)
         row = {"id": new_id(), "changed_at": datetime.now(timezone.utc).isoformat(),
                "reason": None, **to_row(entry)}
         self.history.append(row)
@@ -117,3 +125,20 @@ class FakeSubscriptionRepository:
 
     def list_history(self, subscription_id):
         return copy.deepcopy([h for h in self.history if h["subscription_id"] == str(subscription_id)])
+
+
+def seed_catalog(r, customer_auth_id, other_customer_auth_id):
+    """Customers, plans, products, variants and taxes shared by the API tests."""
+    r.customer = r.add(r.customers, name="Acme", auth_user_id=str(customer_auth_id))
+    r.other_customer = r.add(r.customers, name="Globex", auth_user_id=str(other_customer_auth_id))
+    r.inactive_customer = r.add(r.customers, name="Gone", is_active=False)
+    r.plan = r.add(r.plans, name="Pro Monthly", interval="monthly", price=100, min_quantity=1,
+                   pausable=True, closable_early=True, renewable=True)
+    r.strict_plan = r.add(r.plans, name="Locked Yearly", interval="yearly", price=1000, min_quantity=5,
+                          pausable=False, closable_early=False, renewable=False)
+    r.product = r.add(r.products, name="Seat", price=50)
+    r.variant = r.add(r.variants, product_id=r.product["id"], name="Premium", extra_price=25)
+    r.other_product = r.add(r.products, name="Storage", price=10)
+    r.gst = r.add(r.taxes, name="GST", rate=18)
+    r.net30 = r.add(r.payment_terms, name="Net 30", days_due=30)
+    return r

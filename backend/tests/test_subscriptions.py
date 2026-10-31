@@ -9,7 +9,7 @@ from app.core.current_user import CurrentUser, Role, get_current_user
 from app.main import app
 from app.repositories.subscription_repository import get_subscription_repository
 from app.services.subscription_service import price_line
-from subscription_fakes import FakeSubscriptionRepository
+from subscription_fakes import FakeSubscriptionRepository, seed_catalog
 
 TODAY = date.today()
 STAFF = CurrentUser(id=uuid.uuid4(), role=Role.STAFF)
@@ -20,19 +20,7 @@ OTHER_CUSTOMER_USER = CurrentUser(id=uuid.uuid4(), role=Role.CUSTOMER)
 
 @pytest.fixture
 def repo():
-    r = FakeSubscriptionRepository()
-    r.customer = r.add(r.customers, name="Acme", auth_user_id=str(CUSTOMER_USER.id))
-    r.other_customer = r.add(r.customers, name="Globex", auth_user_id=str(OTHER_CUSTOMER_USER.id))
-    r.inactive_customer = r.add(r.customers, name="Gone", is_active=False)
-    r.plan = r.add(r.plans, name="Pro Monthly", interval="monthly", price=100, min_quantity=1,
-                   pausable=True, closable_early=True, renewable=True)
-    r.strict_plan = r.add(r.plans, name="Locked Yearly", interval="yearly", price=1000, min_quantity=5,
-                          pausable=False, closable_early=False, renewable=False)
-    r.product = r.add(r.products, name="Seat", price=50)
-    r.variant = r.add(r.variants, product_id=r.product["id"], name="Premium", extra_price=25)
-    r.other_product = r.add(r.products, name="Storage", price=10)
-    r.gst = r.add(r.taxes, name="GST", rate=18)
-    return r
+    return seed_catalog(FakeSubscriptionRepository(), CUSTOMER_USER.id, OTHER_CUSTOMER_USER.id)
 
 
 @pytest.fixture

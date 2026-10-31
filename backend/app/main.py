@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import subscriptions
+from app.routers import invoices, subscriptions
 
 app = FastAPI(title="Brightloop Subscription API")
 
@@ -14,6 +14,7 @@ app.add_middleware(
 )
 
 app.include_router(subscriptions.router)
+app.include_router(invoices.router)
 
 
 @app.get("/health")

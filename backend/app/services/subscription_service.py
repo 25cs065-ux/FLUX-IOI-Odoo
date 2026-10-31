@@ -152,8 +152,10 @@ def _validate_optional_refs(repo: SubscriptionRepository, payment_terms_id, quot
         _require_active(repo.get_quotation_template, quotation_template_id, "Quotation template")
 
 
-def build_lines(repo: SubscriptionRepository, inputs: list[SubscriptionLineInput]) -> list[dict]:
-    """Resolve product / variant / tax references and price each line."""
+def build_lines(repo: SubscriptionRepository, inputs: list[SubscriptionLineInput],
+                snapshot_tax: bool = False) -> list[dict]:
+    """Resolve product / variant / tax references and price each line.
+    snapshot_tax adds tax_name / tax_rate (invoice lines store a copy)."""
     lines = []
     for index, item in enumerate(inputs):
         product_id, variant = item.product_id, None
@@ -174,11 +176,12 @@ def build_lines(repo: SubscriptionRepository, inputs: list[SubscriptionLineInput
             if variant and variant.get("name"):
                 description = f"{description} - {variant['name']}"
 
-        tax_rate = None
+        tax_rate, tax_name = None, None
         if item.tax_id:
-            tax_rate = _dec(_require_active(repo.get_tax, item.tax_id, "Tax").get("rate") or 0)
+            tax = _require_active(repo.get_tax, item.tax_id, "Tax")
+            tax_rate, tax_name = _dec(tax.get("rate") or 0), tax.get("name")
 
-        lines.append({
+        line = {
             "product_id": product_id,
             "variant_id": item.variant_id,
             "sequence": item.sequence if item.sequence is not None else (index + 1) * 10,
@@ -188,7 +191,10 @@ def build_lines(repo: SubscriptionRepository, inputs: list[SubscriptionLineInput
             "discount_percent": item.discount_percent,
             "tax_id": item.tax_id,
             **price_line(item.quantity, unit_price, item.discount_percent, tax_rate),
-        })
+        }
+        if snapshot_tax:
+            line.update(tax_name=tax_name, tax_rate=tax_rate)
+        lines.append(line)
     return lines
 
 
