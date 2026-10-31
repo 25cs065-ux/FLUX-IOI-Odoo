@@ -1,79 +1,107 @@
 import pytest
-from datetime import datetime, timedelta, timezone
+from datetime import date, timedelta
+from unittest.mock import patch, MagicMock
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
 from fastapi import FastAPI
-from app.schemas.discount import DiscountCreate, DiscountType, AppliesTo
+from app.schemas.discount import DiscountCreate
 from app.routers.discounts import router as discounts_router
+from app.core.auth import get_current_user
 
 test_app = FastAPI()
 test_app.include_router(discounts_router)
 client = TestClient(test_app)
 
-def test_valid_percentage_discount():
-    discount = DiscountCreate(
-        code="SAVE25",
-        discount_type=DiscountType.PERCENTAGE,
-        value=25.0,
-        applies_to=AppliesTo.SUBSCRIPTION
+def test_valid_discount_creation():
+    today = date.today()
+    d = DiscountCreate(
+        code="SAVE20",
+        discount_percent=20.0,
+        valid_from=today,
+        valid_until=today + timedelta(days=10)
     )
-    assert discount.value == 25.0
-    assert discount.discount_type == DiscountType.PERCENTAGE
+    assert d.code == "SAVE20"
+    assert d.discount_percent == 20.0
 
-def test_percentage_over_100_fails():
+def test_negative_discount_percent_fails():
+    today = date.today()
     with pytest.raises(ValidationError):
         DiscountCreate(
-            code="INVALID150",
-            discount_type=DiscountType.PERCENTAGE,
-            value=150.0,
-            applies_to=AppliesTo.PRODUCT
+            code="INVALID",
+            discount_percent=-5.0,
+            valid_from=today,
+            valid_until=today + timedelta(days=10)
         )
 
-def test_negative_value_fails():
+def test_over_100_percent_fails():
+    today = date.today()
     with pytest.raises(ValidationError):
         DiscountCreate(
-            code="NEGATIVE10",
-            discount_type=DiscountType.FIXED,
-            value=-10.0,
-            applies_to=AppliesTo.PRODUCT
+            code="OVER100",
+            discount_percent=105.0,
+            valid_from=today,
+            valid_until=today + timedelta(days=10)
         )
 
-def test_negative_min_purchase_fails():
+def test_valid_until_before_valid_from_fails():
+    today = date.today()
     with pytest.raises(ValidationError):
         DiscountCreate(
-            code="BADPURCHASE",
-            discount_type=DiscountType.FIXED,
-            value=10.0,
-            min_purchase=-5.0,
-            applies_to=AppliesTo.PRODUCT
+            code="DATEFAIL",
+            discount_percent=10.0,
+            valid_from=today,
+            valid_until=today - timedelta(days=1)
         )
 
-def test_zero_min_quantity_fails():
-    with pytest.raises(ValidationError):
-        DiscountCreate(
-            code="BADQTY",
-            discount_type=DiscountType.FIXED,
-            value=10.0,
-            min_quantity=0,
-            applies_to=AppliesTo.PRODUCT
-        )
+def test_admin_enforcement_blocks_unauthenticated():
+    today = date.today()
+    payload = {
+        "code": "PROMO10",
+        "discount_percent": 10.0,
+        "valid_from": str(today),
+        "valid_until": str(today + timedelta(days=5))
+    }
+    res = client.post("/discounts/", json=payload)
+    assert res.status_code == 401
 
-def test_end_date_before_start_date_fails():
-    now = datetime.now(timezone.utc)
-    with pytest.raises(ValidationError):
-        DiscountCreate(
-            code="PASTEND",
-            discount_type=DiscountType.FIXED,
-            value=10.0,
-            applies_to=AppliesTo.PRODUCT,
-            start_date=now,
-            end_date=now - timedelta(days=2)
-        )
+def test_admin_enforcement_blocks_customer():
+    test_app.dependency_overrides[get_current_user] = lambda: {"id": "c1", "email": "cust@test.com", "role": "customer"}
+    try:
+        today = date.today()
+        payload = {
+            "code": "PROMO10",
+            "discount_percent": 10.0,
+            "valid_from": str(today),
+            "valid_until": str(today + timedelta(days=5))
+        }
+        res = client.post("/discounts/", json=payload)
+        assert res.status_code == 403
+    finally:
+        test_app.dependency_overrides.clear()
 
-def test_admin_enforcement_blocks_non_admin_listing():
-    res = client.get("/discounts", headers={"X-User-Role": "customer"})
-    assert res.status_code == 403
+@patch("app.routers.discounts.supabase")
+def test_admin_enforcement_permits_admin(mock_supabase):
+    test_app.dependency_overrides[get_current_user] = lambda: {"id": "a1", "email": "admin@test.com", "role": "admin"}
+    
+    mock_table = MagicMock()
+    mock_table.insert.return_value.execute.return_value.data = [{
+        "id": "00000000-0000-0000-0000-000000000000",
+        "code": "ADMINPROMO",
+        "discount_percent": 15.0,
+        "valid_from": "2026-10-31",
+        "valid_until": "2026-11-10"
+    }]
+    mock_supabase.table.return_value = mock_table
 
-def test_admin_enforcement_blocks_missing_role():
-    res = client.get("/discounts")
-    assert res.status_code == 403
+    try:
+        today = date.today()
+        payload = {
+            "code": "ADMINPROMO",
+            "discount_percent": 15.0,
+            "valid_from": str(today),
+            "valid_until": str(today + timedelta(days=10))
+        }
+        res = client.post("/discounts/", json=payload)
+        assert res.status_code in (200, 201)
+    finally:
+        test_app.dependency_overrides.clear()
