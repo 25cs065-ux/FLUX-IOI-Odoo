@@ -21,7 +21,7 @@ export interface ColumnDef<TRow> {
   hideOnMobile?: boolean;
 }
 
-export interface DataTableProps<TRow extends Record<string, unknown>> {
+export interface DataTableProps<TRow extends object> {
   /** Column definitions. */
   columns: ColumnDef<TRow>[];
   /** Row data. Each row must have a unique identifier field. */
@@ -49,7 +49,7 @@ export interface DataTableProps<TRow extends Record<string, unknown>> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function matchesSearch<TRow extends Record<string, unknown>>(
+function matchesSearch<TRow extends object>(
   row: TRow,
   query: string,
   keys?: (keyof TRow)[]
@@ -57,7 +57,7 @@ function matchesSearch<TRow extends Record<string, unknown>>(
   const q = query.toLowerCase();
   const fields = keys ?? (Object.keys(row) as (keyof TRow)[]);
   return fields.some((k) => {
-    const v = row[k];
+    const v = (row as Record<string, unknown>)[k as string];
     return (typeof v === "string" || typeof v === "number") &&
       String(v).toLowerCase().includes(q);
   });
@@ -67,7 +67,7 @@ function matchesSearch<TRow extends Record<string, unknown>>(
 // Component
 // ---------------------------------------------------------------------------
 
-export function DataTable<TRow extends Record<string, unknown>>({
+export function DataTable<TRow extends object>({
   columns,
   data,
   rowKey = "id" as keyof TRow,
@@ -159,29 +159,32 @@ export function DataTable<TRow extends Record<string, unknown>>({
                 </td>
               </tr>
             ) : (
-              pageRows.map((row) => (
-                <tr
-                  key={String(row[rowKey])}
-                  className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors"
-                >
-                  {columns.map((col) => (
-                    <td
-                      key={col.key}
-                      className={cn(
-                        "px-3 py-2.5 text-foreground",
-                        col.hideOnMobile && "hidden sm:table-cell",
-                        col.className
-                      )}
-                    >
-                      {col.cell
-                        ? col.cell(row)
-                        : col.key in row
-                          ? String(row[col.key] ?? "")
-                          : ""}
-                    </td>
-                  ))}
-                </tr>
-              ))
+              pageRows.map((row) => {
+                const rowRecord = row as Record<string, unknown>;
+                return (
+                  <tr
+                    key={String(rowRecord[rowKey as string])}
+                    className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors"
+                  >
+                    {columns.map((col) => (
+                      <td
+                        key={col.key}
+                        className={cn(
+                          "px-3 py-2.5 text-foreground",
+                          col.hideOnMobile && "hidden sm:table-cell",
+                          col.className
+                        )}
+                      >
+                        {col.cell
+                          ? col.cell(row)
+                          : col.key in rowRecord
+                            ? String(rowRecord[col.key] ?? "")
+                            : ""}
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>
