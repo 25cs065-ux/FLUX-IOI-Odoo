@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 supabase
 python-jose[cryptography]
+PyJWT[crypto]>=2.8
 passlib[bcrypt]
 pydantic-settings
 python-dotenv
