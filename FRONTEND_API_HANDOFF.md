@@ -1,10 +1,10 @@
 # Frontend API Handoff — Brightloop Backend
 
-Source: branch `feature/aadya-backend` (`b52bd92`). Everything below was read from the code and from the app's own OpenAPI output; the example responses were produced by the real routers running against the test database stand-in.
+Source: branch `feature/aadya-backend`. Everything below was read from the code and from the app's own OpenAPI output; the example responses were produced by the real routers running against the test database stand-in.
 
 **Status labels:** ✅ implemented and tested · ⏳ not implemented yet · ⚠️ implemented but not verified against the live Supabase database
 
-> ⚠️ **Right now every endpoint except `/health` refuses requests.** With no token you get `401`; with any token you get `503 {"detail": "Supabase JWT verification is not configured yet"}`. Build against the contracts below (or the `frontend/src/mocks` folder) until the team's shared Supabase JWT check is plugged into `backend/app/core/current_user.py`. The contracts will not change when that happens.
+> ⚠️ **Token checking happens in the team's shared auth module (`backend/app/core/auth.py`, on Vaidehi's branches).** These endpoints already call it, but until that module is merged and the server has Supabase credentials, any request with a token gets `503 {"detail": "Authentication is not configured on this server"}` (no token still gets `401`). Build against the contracts below (or the `frontend/src/mocks` folder). They won't change when it goes live.
 
 ---
 
@@ -31,7 +31,7 @@ Authorization: Bearer <session.access_token>
 ```
 
 **Not decided or not verified yet:**
-- ⏳ **Where the role comes from.** The app role (`admin` / `staff` / `customer`) is not in the standard Supabase token. Its `role` claim is always `"authenticated"`. The team must pick `app_metadata.role` or the `customers.role` column. The frontend should not decide roles itself.
+- **Where the role comes from.** The shared auth module verifies the token with Supabase and reads the app role (`admin` / `staff` / `customer`) from the `customers.role` column, defaulting to `customer`. The token's own `role` claim is always `"authenticated"`. The frontend should not decide roles itself, and must never send an `X-User-Role` header: it is ignored.
 - ⚠️ **Supabase project settings:** email confirmation on/off, allowed redirect URLs, SMTP, and minimum password length. The test plan requires passwords **longer than 8 characters**, so validate that on the form too.
 - ⚠️ **Packages and env vars:** `frontend/package.json` has `next-auth` but no `@supabase/supabase-js`, and `.env.example` still has `NEXTAUTH_*` variables. These predate the Supabase Auth decision. Confirm with the team before building on NextAuth.
 
@@ -58,7 +58,7 @@ Authorization: Bearer <session.access_token>
 |---|---|
 | `401` | No token. The response has a `WWW-Authenticate: Bearer` header |
 | `403` | The role isn't allowed |
-| `503` | Auth isn't configured yet (see the note at the top) |
+| `503` | Auth isn't configured on the server yet (see the note at the top) |
 
 ---
 
@@ -108,6 +108,7 @@ Authorization: Bearer <session.access_token>
 Rule of thumb: if `detail` is an array, it's field errors; if it's a string, show it as a message.
 
 - `409` means "not allowed in the current status" (or overpayment / a duplicate). Reload the record and show `detail`.
+- `PATCH` uses optimistic locking: if someone else saved the record after you loaded it, you get `409 "... was changed by someone else; reload and try again"`. Reload, re-apply the edit, then save again.
 - Unknown request fields are rejected with `422` (`extra_forbidden`).
 
 ---
@@ -215,7 +216,7 @@ The server calculates all totals.
 | `PATCH /invoices/{id}` | admin, staff | `InvoiceUpdate` | `InvoiceDetail` |
 | `POST /invoices/{id}/send` | admin, staff | — | `Invoice`; draft → sent (a zero total goes straight to `paid`) |
 | `POST /invoices/{id}/cancel` | admin, staff | — | `Invoice`; draft → cancelled |
-| `POST /invoices/{id}/void` | admin, staff | — | `Invoice`; sent/overdue with nothing paid → void |
+| `POST /invoices/{id}/void` | admin, staff | — | `Invoice`; sent/overdue with nothing paid and no pending payment → void |
 
 ² Customers see only their own invoices, and never drafts.
 
