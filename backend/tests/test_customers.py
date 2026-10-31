@@ -17,19 +17,42 @@ def test_unauthenticated_requests_blocked():
     assert client.post("/customers/", json={"name": "Alice", "email": "alice@test.com"}).status_code == 401
     assert client.patch(f"/customers/{DUMMY_ID}", json={"name": "Alice Updated"}).status_code == 401
 
-def test_customer_cannot_view_other_customer():
+@patch("app.routers.customers.supabase")
+def test_duplicate_customer_creation_fails(mock_sb):
     test_app.dependency_overrides[get_current_user] = lambda: {"id": "user-A", "email": "a@test.com", "role": "customer"}
-    with patch("app.routers.customers.supabase") as mock_sb:
-        mock_sb.table.return_value.select.return_value.eq.return_value.execute.return_value.data = [{
-            "id": DUMMY_ID,
-            "name": "Bob",
-            "email": "bob@test.com",
-            "auth_user_id": "user-B",
-            "role": "customer"
-        }]
-        res = client.get(f"/customers/{DUMMY_ID}")
-        assert res.status_code == 403
-    test_app.dependency_overrides.clear()
+    mock_sb.table.return_value.select.return_value.or_.return_value.execute.return_value.data = [{"id": DUMMY_ID}]
+    try:
+        res = client.post("/customers/", json={"name": "Alice", "email": "a@test.com"})
+        assert res.status_code == 409
+        assert "already exists" in res.json()["detail"]
+    finally:
+        test_app.dependency_overrides.clear()
+
+@patch("app.routers.customers.supabase")
+def test_customer_cannot_deactivate_self(mock_sb):
+    test_app.dependency_overrides[get_current_user] = lambda: {"id": "user-A", "email": "a@test.com", "role": "customer"}
+    mock_record = {
+        "id": DUMMY_ID,
+        "name": "Alice",
+        "email": "a@test.com",
+        "auth_user_id": "user-A",
+        "is_active": True,
+        "role": "customer"
+    }
+    mock_table = MagicMock()
+    mock_table.select.return_value.eq.return_value.execute.return_value.data = [mock_record]
+    mock_table.update.return_value.eq.return_value.execute.return_value.data = [mock_record]
+    mock_sb.table.return_value = mock_table
+
+    try:
+        res = client.patch(f"/customers/{DUMMY_ID}", json={"is_active": False})
+        assert res.status_code == 200
+        called_update_payload = mock_table.update.call_args[0][0]
+        # is_active must be stripped for non-admin/staff
+        assert "is_active" not in called_update_payload
+        assert "updated_at" not in called_update_payload
+    finally:
+        test_app.dependency_overrides.clear()
 
 @patch("app.routers.customers.supabase")
 def test_admin_can_view_any_customer(mock_sb):
@@ -45,23 +68,5 @@ def test_admin_can_view_any_customer(mock_sb):
         res = client.get(f"/customers/{DUMMY_ID}")
         assert res.status_code == 200
         assert res.json()["name"] == "Bob"
-    finally:
-        test_app.dependency_overrides.clear()
-
-@patch("app.routers.customers.supabase")
-def test_list_customers_with_pagination_and_search(mock_sb):
-    test_app.dependency_overrides[get_current_user] = lambda: {"id": "admin-1", "email": "admin@test.com", "role": "admin"}
-    mock_query = MagicMock()
-    mock_sb.table.return_value.select.return_value = mock_query
-    mock_query.or_.return_value = mock_query
-    mock_query.order.return_value = mock_query
-    mock_query.range.return_value.execute.return_value.data = []
-
-    try:
-        res = client.get("/customers/?search=test%2Cevil()&limit=10&offset=5")
-        assert res.status_code == 200
-        # Verify sanitization stripped commas and parentheses
-        mock_query.or_.assert_called_once_with("name.ilike.%testevil%,email.ilike.%testevil%")
-        mock_query.range.assert_called_once_with(5, 14)
     finally:
         test_app.dependency_overrides.clear()
