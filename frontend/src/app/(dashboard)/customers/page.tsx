@@ -6,7 +6,7 @@ import { cn } from "cn";
 
 import { DataTable, StatusBadge, StatCard, type ColumnDef } from "@/components/shared";
 import { Button } from "@/components/ui/button";
-import { apiClient, buildQuery } from "@/lib/api-client";
+import { buildQuery, clearApiCache, getAllPages } from "@/lib/api-client";
 import { getSupabaseToken } from "@/lib/supabase-token";
 import { useDebounce } from "@/hooks/useDebounce";
 import { formatDate } from "@/lib/format";
@@ -92,13 +92,9 @@ export default function CustomersPage() {
       const token = await getSupabaseToken();
       setLoading(true);
       setError(null);
-      const qs = buildQuery({
-        search: debouncedSearch || undefined,
-        limit: 100,
-        offset: 0,
-      });
-      const { data } = await apiClient.get<Customer[]>(`/customers/${qs}`, token ? { token } : undefined);
-      if (!data) throw new Error("The customers endpoint returned no data.");
+      // Page through every match (the endpoint returns at most 100 per request).
+      const qs = buildQuery({ search: debouncedSearch || undefined });
+      const data = await getAllPages<Customer>(`/customers/${qs}`, 100, token ? { token } : undefined);
       setCustomers(data);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to load customers";
@@ -131,7 +127,7 @@ export default function CustomersPage() {
           <p className="mt-0.5 text-sm text-muted-foreground">All customer accounts</p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={fetchCustomers} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={() => { clearApiCache(); void fetchCustomers(); }} disabled={loading}>
             <RefreshCw className={cn("size-3.5", loading && "animate-spin")} /> Refresh
           </Button>
         </div>

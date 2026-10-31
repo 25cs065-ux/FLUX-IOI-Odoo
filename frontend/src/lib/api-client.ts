@@ -310,9 +310,56 @@ async function request<T>(
 
 async function signOutAndRedirect(): Promise<void> {
   if (typeof window === "undefined") return;
+  clearApiCache();
   const { supabase } = await import("@/lib/supabase");
   await supabase.auth.signOut();
   window.location.replace("/login");
+}
+
+// ---------------------------------------------------------------------------
+// GET cache
+//
+// Pages share lookup lists (customers, plans, subscriptions…) and React may
+// mount a page twice. Identical GETs within GET_CACHE_MS reuse one request,
+// including requests still in flight. The key includes the caller's token so
+// two signed-in users never share data. Any successful POST/PUT/PATCH/DELETE
+// clears the cache, and Refresh buttons call clearApiCache() first.
+// ---------------------------------------------------------------------------
+
+const GET_CACHE_MS = 30_000;
+const getCache = new Map<string, { expires: number; promise: Promise<{ data: unknown; status: number }> }>();
+
+/** Forget every cached GET response (call after a change or on Refresh). */
+export function clearApiCache(): void {
+  getCache.clear();
+}
+
+async function cachedGet<T>(path: string, options?: RequestOptions): Promise<{ data: T | null; status: number }> {
+  // Resolve the token first so it can be part of the key.
+  let token = options?.token;
+  if (!token && typeof window !== "undefined") {
+    const { getSupabaseToken } = await import("@/lib/supabase-token");
+    token = (await getSupabaseToken()) ?? undefined;
+  }
+  const key = `${token ? token.slice(-24) : "anon"} ${path}`;
+  const now = Date.now();
+  const hit = getCache.get(key);
+  if (hit && hit.expires > now) {
+    return hit.promise as Promise<{ data: T | null; status: number }>;
+  }
+  const promise = request<T>("GET", path, undefined, { ...options, token });
+  getCache.set(key, { expires: now + GET_CACHE_MS, promise });
+  promise.catch(() => {
+    // Never keep failures: the next call retries.
+    if (getCache.get(key)?.promise === promise) getCache.delete(key);
+  });
+  return promise;
+}
+
+async function mutate<T>(method: string, path: string, body: unknown, options?: RequestOptions) {
+  const result = await request<T>(method, path, body, options);
+  clearApiCache();
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -320,52 +367,62 @@ async function signOutAndRedirect(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export const apiClient = {
-  /** GET request. */
+  /** GET request (briefly cached and de-duplicated; see GET cache above). */
   get<T>(path: string, options?: RequestOptions) {
-    return request<T>("GET", path, undefined, options);
+    return cachedGet<T>(path, options);
   },
 
   /** POST request with a JSON body. */
   post<T>(path: string, body: unknown, options?: RequestOptions) {
-    return request<T>("POST", path, body, options);
+    return mutate<T>("POST", path, body, options);
   },
 
   /** PUT request with a JSON body. */
   put<T>(path: string, body: unknown, options?: RequestOptions) {
-    return request<T>("PUT", path, body, options);
+    return mutate<T>("PUT", path, body, options);
   },
 
   /** PATCH request with a partial JSON body. */
   patch<T>(path: string, body: unknown, options?: RequestOptions) {
-    return request<T>("PATCH", path, body, options);
+    return mutate<T>("PATCH", path, body, options);
   },
 
   /** DELETE request. Body is optional. */
   delete<T>(path: string, body?: unknown, options?: RequestOptions) {
-    return request<T>("DELETE", path, body, options);
+    return mutate<T>("DELETE", path, body, options);
   },
 } as const;
 
+// Largest `limit` each list endpoint accepts (larger values return HTTP 422).
+const MAX_PAGE_SIZE: Array<[prefix: string, max: number]> = [
+  ["/customers", 100],
+];
+const DEFAULT_MAX_PAGE_SIZE = 200;
+
+function maxPageSize(path: string): number {
+  return MAX_PAGE_SIZE.find(([prefix]) => path.startsWith(prefix))?.[1] ?? DEFAULT_MAX_PAGE_SIZE;
+}
+
+/**
+ * Fetch every page of a list endpoint. `pageSize` is capped at the endpoint's
+ * maximum, so callers can never trigger the backend's 422 for an oversized limit.
+ */
 export async function getAllPages<T>(
   path: string,
-  pageSize = 100,
+  pageSize = DEFAULT_MAX_PAGE_SIZE,
   options?: RequestOptions
 ): Promise<T[]> {
-  const safePageSize = Math.min(Math.max(pageSize, 1), 100);
+  const limit = Math.min(pageSize, maxPageSize(path));
   const items: T[] = [];
   let offset = 0;
 
   while (true) {
-    const pagination = buildQuery({ limit: safePageSize, offset });
-    const query = pagination.slice(1);
-    const separator = path.includes("?") ? "&" : "";
-    const { data } = await apiClient.get<T[]>(
-      `${path}${separator}${query}`,
-      options
-    );
+    const pagination = buildQuery({ limit, offset });
+    const url = path.includes("?") ? `${path}&${pagination.slice(1)}` : `${path}${pagination}`;
+    const { data } = await apiClient.get<T[]>(url, options);
     if (!data) throw new ApiError(200, `The ${path} endpoint returned no data.`);
     items.push(...data);
-    if (data.length < safePageSize) return items;
-    offset += safePageSize;
+    if (data.length < limit) return items;
+    offset += limit;
   }
 }

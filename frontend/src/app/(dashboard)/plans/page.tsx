@@ -6,7 +6,7 @@ import { cn } from "cn";
 
 import { DataTable, StatusBadge, StatCard, type ColumnDef } from "@/components/shared";
 import { Button } from "@/components/ui/button";
-import { apiClient, buildQuery } from "@/lib/api-client";
+import { apiClient, buildQuery, clearApiCache } from "@/lib/api-client";
 import { getSupabaseToken } from "@/lib/supabase-token";
 import { formatDate, formatLabel } from "@/lib/format";
 import { decimalToMinorUnits, formatMinorUnits } from "@/lib/money";
@@ -251,7 +251,7 @@ export default function PlansPage() {
           <Button size="sm" onClick={openCreate}>
             <Plus className="size-3.5" /> Add plan
           </Button>
-          <Button variant="outline" size="sm" onClick={fetchPlans} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={() => { clearApiCache(); void fetchPlans(); }} disabled={loading}>
             <RefreshCw className={cn("size-3.5", loading && "animate-spin")} /> Refresh
           </Button>
         </div>

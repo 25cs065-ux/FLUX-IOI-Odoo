@@ -8,7 +8,7 @@ import { UserCircle, Save } from "lucide-react";
 import { FormField } from "@/components/shared/FormField";
 import { Button } from "@/components/ui/button";
 import { formatDate } from "@/lib/format";
-import { apiClient, getAllPages } from "@/lib/api-client";
+import { apiClient, clearApiCache, getAllPages } from "@/lib/api-client";
 import { getSupabaseSession } from "@/lib/supabase-token";
 import type { ApiCustomer } from "@/types/api";
 
@@ -135,7 +135,7 @@ export default function PortalProfilePage() {
       {error && (
         <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
           <span>{error}</span>
-          <button type="button" className="shrink-0 underline" onClick={() => void fetchProfile()}>
+          <button type="button" className="shrink-0 underline" onClick={() => { clearApiCache(); void fetchProfile(); }}>
             Retry
           </button>
         </div>

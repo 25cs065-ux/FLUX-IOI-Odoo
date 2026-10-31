@@ -19,7 +19,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.core.current_user import AuthBackend, get_auth_backend, get_team_auth
-from app.core.supabase_jwt import AuthSettings, AuthUnavailable, SupabaseTokenVerifier
+from app.core.supabase_jwt import CLOCK_SKEW_SECONDS, AuthSettings, AuthUnavailable, SupabaseTokenVerifier
 from app.main import app
 from app.repositories.subscription_repository import get_subscription_repository
 from subscription_fakes import FakeSubscriptionRepository, seed_catalog
@@ -491,3 +491,28 @@ def test_real_shared_module_never_sees_forged_tokens(real_team):
     install()
     forged = jwt.encode(claims(app_metadata={"role": "admin"}), "attacker-secret-" + "z" * 64, algorithm="HS256")
     assert create_as(client, forged).status_code == 401
+
+
+# ---------------------------------------------------------------- per-token cache
+
+def test_repeated_requests_reuse_the_verified_user(client, env):
+    token = hs256()
+    for _ in range(5):
+        assert call(client, token).status_code == 200
+    assert env.team_calls == 1, "the shared dependency should run once per token, not per request"
+
+
+def test_cache_does_not_outlive_the_token(client, env):
+    token = hs256(exp=int(time.time()) + 1)
+    assert call(client, token).status_code == 200
+    time.sleep(1.2 + CLOCK_SKEW_SECONDS)
+    assert call(client, token).status_code == 401
+
+
+def test_rejected_tokens_are_not_cached(client, env):
+    token = hs256()
+    env.team_override = HTTPException(status_code=401, detail="Invalid or expired token")
+    assert call(client, token).status_code == 401
+    env.team_override = None
+    assert call(client, token).status_code == 200
+    assert env.team_calls == 2

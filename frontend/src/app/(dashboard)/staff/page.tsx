@@ -7,7 +7,7 @@ import { cn } from "cn";
 
 import { DataTable, StatusBadge, StatCard, type ColumnDef } from "@/components/shared";
 import { Button } from "@/components/ui/button";
-import { getAllPages } from "@/lib/api-client";
+import { clearApiCache, getAllPages } from "@/lib/api-client";
 import { getSupabaseToken } from "@/lib/supabase-token";
 import { formatDate } from "@/lib/format";
 
@@ -89,18 +89,10 @@ export default function StaffPage() {
 
     try {
       const token = await getSupabaseToken();
-
-      const data = await getAllPages<StaffMember>(
-        "/customers/",
-        100,
-        token ? { token } : undefined
-      );
-
-      const staffOnly = data.filter(
-        (customer) => customer.role === "staff" || customer.role === "admin"
-      );
-
-      setAllStaff(staffOnly);
+      // /customers/ accepts at most limit=100, so page through it; filter by role client-side.
+      const data = await getAllPages<StaffMember>("/customers/", 100, token ? { token } : undefined);
+      // Keep only staff and admin entries
+      setAllStaff(data.filter((c) => c.role === "staff" || c.role === "admin"));
       setUsingMock(false);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to load staff";
@@ -114,7 +106,8 @@ export default function StaffPage() {
   }, []);
 
   useEffect(() => {
-    fetchStaff();
+    // Start the fetch after the effect returns, so its setState calls don't run synchronously inside the effect.
+    void Promise.resolve().then(() => fetchStaff());
   }, [fetchStaff]);
 
   const filtered = useMemo(
@@ -154,15 +147,8 @@ export default function StaffPage() {
               Offline
             </span>
           )}
-
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={fetchStaff}
-            disabled={loading}
-          >
-            <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
-            Refresh
+          <Button variant="outline" size="sm" onClick={() => { clearApiCache(); void fetchStaff(); }} disabled={loading}>
+            <RefreshCw className={cn("size-3.5", loading && "animate-spin")} /> Refresh
           </Button>
         </div>
       </div>

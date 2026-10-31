@@ -14,7 +14,7 @@ import { StatCard } from "@/components/shared/StatCard";
 import { StatusBadge } from "@/components/shared/StatusBadge";
 import { formatDate } from "@/lib/format";
 import { decimalToMinorUnits, formatMinorUnits as formatExactMoney } from "@/lib/money";
-import { apiClient, getAllPages } from "@/lib/api-client";
+import { apiClient, clearApiCache, getAllPages } from "@/lib/api-client";
 import { getSupabaseToken } from "@/lib/supabase-token";
 import type {
   ApiCustomer,
@@ -111,7 +111,7 @@ export default function PortalOverviewPage() {
       {error && (
         <div className="flex items-center justify-between gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
           <span>{error}</span>
-          <button className="shrink-0 text-xs underline" onClick={() => void fetchOverview()}>
+          <button className="shrink-0 text-xs underline" onClick={() => { clearApiCache(); void fetchOverview(); }}>
             Retry
           </button>
         </div>

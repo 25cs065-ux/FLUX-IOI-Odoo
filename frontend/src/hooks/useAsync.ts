@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useEffect, useLayoutEffect, useRef } from "react";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -70,15 +70,19 @@ export function useAsync<T, Args extends unknown[] = []>(
   const mountedRef = useRef(true);
 
   // Keep asyncFn stable across renders — callers often pass an inline arrow.
+  // Updated after render (refs must not be written during render).
   const asyncFnRef = useRef(asyncFn);
-  asyncFnRef.current = asyncFn;
+  useLayoutEffect(() => {
+    asyncFnRef.current = asyncFn;
+  });
 
-  // Reset mountedRef on first render; clean up on unmount.
-  // We use a ref rather than useEffect to avoid an eslint exhaustive-deps
-  // edge-case with cleanup-only effects.
-  if (mountedRef.current === undefined) {
+  // Mark unmounted so late results don't set state on an unmounted component.
+  useEffect(() => {
     mountedRef.current = true;
-  }
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const execute = useCallback(async (...args: Args): Promise<T | null> => {
     const callId = ++callIdRef.current;

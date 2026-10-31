@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query, status
 from typing import List, Optional
 from datetime import datetime, timezone
 import re
+from uuid import UUID
 
 from app.schemas.customer import (
     CustomerCreate,
@@ -72,10 +73,10 @@ def list_customers(
 
 @router.get("/{customer_id}", response_model=CustomerResponse)
 def get_customer(
-    customer_id: str,
+    customer_id: UUID,
     current_user: dict = Depends(get_current_user)
 ):
-    res = supabase.table("customers").select("*").eq("id", customer_id).execute()
+    res = supabase.table("customers").select("*").eq("id", str(customer_id)).execute()
     if not res.data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
 
@@ -87,11 +88,11 @@ def get_customer(
 
 @router.patch("/{customer_id}", response_model=CustomerResponse)
 def update_customer(
-    customer_id: str,
+    customer_id: UUID,
     payload: CustomerUpdate,
     current_user: dict = Depends(get_current_user)
 ):
-    existing = supabase.table("customers").select("*").eq("id", customer_id).execute()
+    existing = supabase.table("customers").select("*").eq("id", str(customer_id)).execute()
     if not existing.data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
 
@@ -111,7 +112,7 @@ def update_customer(
         if "is_active" in update_data:
             del update_data["is_active"]
 
-    res = supabase.table("customers").update(update_data).eq("id", customer_id).execute()
+    res = supabase.table("customers").update(update_data).eq("id", str(customer_id)).execute()
     if not res.data:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to update customer")
 

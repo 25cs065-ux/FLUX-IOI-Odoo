@@ -29,7 +29,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { formatDate, formatLabel } from "@/lib/format";
 import { decimalToMinorUnits, formatMinorUnits, multiplyMinorUnits } from "@/lib/money";
-import { apiClient, getAllPages } from "@/lib/api-client";
+import { apiClient, clearApiCache, getAllPages } from "@/lib/api-client";
 import { getSupabaseToken } from "@/lib/supabase-token";
 import type {
   ApiCustomer,
@@ -476,7 +476,7 @@ export default function SubscriptionsPage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={fetchSubs}
+            onClick={() => { clearApiCache(); void fetchSubs(); }}
             disabled={loading}
           >
             <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />

@@ -6,7 +6,7 @@ import { cn } from "cn";
 
 import { DataTable, StatusBadge, StatCard, type ColumnDef } from "@/components/shared";
 import { Button } from "@/components/ui/button";
-import { apiClient, buildQuery } from "@/lib/api-client";
+import { apiClient, buildQuery, clearApiCache } from "@/lib/api-client";
 import { getSupabaseToken } from "@/lib/supabase-token";
 import { formatDate } from "@/lib/format";
 
@@ -131,7 +131,10 @@ export default function DiscountsPage() {
     }
   }, [filterActive]);
 
-  useEffect(() => { fetchDiscounts(); }, [fetchDiscounts]);
+  useEffect(() => {
+    // Start the fetch after the effect returns, so its setState calls don't run synchronously inside the effect.
+    void Promise.resolve().then(() => fetchDiscounts());
+  }, [fetchDiscounts]);
 
   const stats = useMemo(() => ({
     total: discounts.length,
@@ -156,7 +159,7 @@ export default function DiscountsPage() {
               <WifiOff className="size-3" /> Offline
             </span>
           )}
-          <Button variant="outline" size="sm" onClick={fetchDiscounts} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={() => { clearApiCache(); void fetchDiscounts(); }} disabled={loading}>
             <RefreshCw className={cn("size-3.5", loading && "animate-spin")} /> Refresh
           </Button>
         </div>
