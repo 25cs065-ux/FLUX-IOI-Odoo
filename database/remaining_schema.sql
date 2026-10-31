@@ -1,5 +1,5 @@
-﻿-- =============================================================================
--- Brightloop Subscription Management System ΓÇö Remaining Tables
+-- =============================================================================
+-- Brightloop Subscription Management System — Remaining Tables
 -- File    : database/remaining_schema.sql
 -- Owner   : backend core (Aadya)
 -- Purpose : Creates ONLY the tables that do not yet exist in the shared
@@ -10,55 +10,55 @@
 --             quotation_template_lines, quotation_templates, taxes, variants
 --
 -- Safety guarantees
---   ΓÇó Every CREATE TABLE uses IF NOT EXISTS ΓÇö script is idempotent.
---   ΓÇó No existing table is DROPped, ALTERed, RENAMEd, or TRUNCATEd.
---   ΓÇó No data is DELETEd or modified.
---   ΓÇó All primary keys use UUID (gen_random_uuid()) to match existing tables.
---   ΓÇó All foreign keys that reference existing tables use their real UUID PKs.
---   ΓÇó User-identity columns reference auth.users(id) (Supabase Auth), NOT a
+--   • Every CREATE TABLE uses IF NOT EXISTS — script is idempotent.
+--   • No existing table is DROPped, ALTERed, RENAMEd, or TRUNCATEd.
+--   • No data is DELETEd or modified.
+--   • All primary keys use UUID (gen_random_uuid()) to match existing tables.
+--   • All foreign keys that reference existing tables use their real UUID PKs.
+--   • User-identity columns reference auth.users(id) (Supabase Auth), NOT a
 --     custom public.users table which does not exist in this database.
---   ΓÇó RLS is ENABLED on every new public table; NO public-access policies are
+--   • RLS is ENABLED on every new public table; NO public-access policies are
 --     created.  The FastAPI service role (BYPASSRLS) accesses tables directly.
 --
 -- Tables created here (10)
---   1.  payment_terms              ΓÇö payment condition definitions
---   2.  subscriptions              ΓÇö core subscription lifecycle records
---   3.  subscription_lines         ΓÇö per-product line items within a subscription
---   4.  subscription_status_history ΓÇö append-only status transition audit log
---   5.  subscription_discounts     ΓÇö discounts applied to subscriptions
---   6.  invoices                   ΓÇö billing documents
---   7.  invoice_lines              ΓÇö line items on an invoice
---   8.  payments                   ΓÇö payment records against invoices
---   9.  discount_usages            ΓÇö per-redemption audit trail
+--   1.  payment_terms              — payment condition definitions
+--   2.  subscriptions              — core subscription lifecycle records
+--   3.  subscription_lines         — per-product line items within a subscription
+--   4.  subscription_status_history — append-only status transition audit log
+--   5.  subscription_discounts     — discounts applied to subscriptions
+--   6.  invoices                   — billing documents
+--   7.  invoice_lines              — line items on an invoice
+--   8.  payments                   — payment records against invoices
+--   9.  discount_usages            — per-redemption audit trail
 --
 -- Existing table names and known columns used as FK targets
---   customers(id UUID)             ΓÇö customer billing entity
---   plans(id UUID)                 ΓÇö subscription plan tier
---   products(id UUID)              ΓÇö product catalogue entry
---   variants(id UUID)              ΓÇö product variant  [NOT product_variants]
---   taxes(id UUID)                 ΓÇö tax rule
---   quotation_templates(id UUID)   ΓÇö quotation template
---   discounts(id UUID)             ΓÇö discount catalogue entry
---   auth.users(id UUID)            ΓÇö Supabase Auth identity (created_by / recorded_by)
+--   customers(id UUID)             — customer billing entity
+--   plans(id UUID)                 — subscription plan tier
+--   products(id UUID)              — product catalogue entry
+--   variants(id UUID)              — product variant  [NOT product_variants]
+--   taxes(id UUID)                 — tax rule
+--   quotation_templates(id UUID)   — quotation template
+--   discounts(id UUID)             — discount catalogue entry
+--   auth.users(id UUID)            — Supabase Auth identity (created_by / recorded_by)
 --
 -- Known column-name differences between schema.sql and the live DB
---   schema.sql assumption          ΓåÆ live column name
---   products.sales_price           ΓåÆ products.price
---   plans.billing_interval         ΓåÆ plans.interval
---   product_variants (table)       ΓåÆ variants (table)
---   customers.user_id              ΓåÆ customers.auth_user_id
---   qtl.quotation_template_id      ΓåÆ quotation_template_lines.template_id
+--   schema.sql assumption          → live column name
+--   products.sales_price           → products.price
+--   plans.billing_interval         → plans.interval
+--   product_variants (table)       → variants (table)
+--   customers.user_id              → customers.auth_user_id
+--   qtl.quotation_template_id      → quotation_template_lines.template_id
 -- (See dependency report at end of file for full list.)
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
--- Extensions  (idempotent ΓÇö no-op if already installed)
+-- Extensions  (idempotent — no-op if already installed)
 -- ---------------------------------------------------------------------------
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";   -- gen_random_uuid()
 CREATE EXTENSION IF NOT EXISTS "citext";     -- case-insensitive text (email, codes)
 
 -- ---------------------------------------------------------------------------
--- Sequences  (idempotent ΓÇö no-op if already created; counters are untouched)
+-- Sequences  (idempotent — no-op if already created; counters are untouched)
 -- ---------------------------------------------------------------------------
 CREATE SEQUENCE IF NOT EXISTS invoice_number_seq
     START WITH 1000
@@ -82,7 +82,7 @@ CREATE SEQUENCE IF NOT EXISTS quotation_number_seq
 -- 1. payment_terms
 --    Named payment conditions referenced by subscriptions and invoices.
 --    e.g. "Net-30", "Due on Receipt", "50% upfront".
---    Not present in the existing 9 Supabase tables ΓÇö created fresh here.
+--    Not present in the existing 9 Supabase tables — created fresh here.
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS payment_terms (
     id               UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -103,10 +103,10 @@ CREATE INDEX IF NOT EXISTS idx_payment_terms_is_active ON payment_terms (is_acti
 -- =============================================================================
 -- 2. subscriptions
 --    Core subscription records.  Covers the full lifecycle:
---      draft ΓåÆ quotation ΓåÆ confirmed ΓåÆ active ΓåÆ paused ΓåÆ active (resume)
---                                    ΓåÆ active  ΓåÆ closed
---                                    ΓåÆ confirmed ΓåÆ closed (early close)
---      quotation ΓåÆ closed (rejected)
+--      draft → quotation → confirmed → active → paused → active (resume)
+--                                    → active  → closed
+--                                    → confirmed → closed (early close)
+--      quotation → closed (rejected)
 --
 --    FK targets use the real live-DB column names and UUID types:
 --      customers(id), plans(id), quotation_templates(id),
@@ -117,7 +117,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     -- subscription_number: staff-facing display reference
     subscription_number   TEXT          NOT NULL UNIQUE
                               DEFAULT ('SUB-' || LPAD(nextval('subscription_number_seq')::TEXT, 6, '0')),
-    -- quotation_number: customer-facing reference, set when statusΓåÆ'quotation'
+    -- quotation_number: customer-facing reference, set when status→'quotation'
     quotation_number      TEXT          UNIQUE,
     customer_id           UUID          NOT NULL
                               REFERENCES customers (id) ON DELETE RESTRICT,
@@ -168,7 +168,7 @@ CREATE INDEX IF NOT EXISTS idx_sub_next_billing_date   ON subscriptions (next_bi
 CREATE INDEX IF NOT EXISTS idx_sub_payment_terms_id    ON subscriptions (payment_terms_id);
 CREATE INDEX IF NOT EXISTS idx_sub_quotation_tmpl_id   ON subscriptions (quotation_template_id);
 CREATE INDEX IF NOT EXISTS idx_sub_created_by          ON subscriptions (created_by);
--- Partial index for fast billing queries ΓÇö only active/confirmed subscriptions
+-- Partial index for fast billing queries — only active/confirmed subscriptions
 CREATE INDEX IF NOT EXISTS idx_sub_active
     ON subscriptions (customer_id, next_billing_date)
     WHERE status IN ('active', 'confirmed');
@@ -269,7 +269,7 @@ CREATE INDEX IF NOT EXISTS idx_subdis_applied_by      ON subscription_discounts 
 --      invoices are excluded from the index so they can be replaced.
 --
 --    Tax snapshot columns (tax_name, tax_rate) capture values from the existing
---    'taxes' table at the moment the invoice is issued ΓÇö protecting historical
+--    'taxes' table at the moment the invoice is issued — protecting historical
 --    accuracy if the tax rule is later edited.
 --
 --    discount_id references the existing 'discounts' table for invoice-level
@@ -305,13 +305,13 @@ CREATE TABLE IF NOT EXISTS invoices (
     tax_amount           NUMERIC(14,2) NOT NULL DEFAULT 0.00 CHECK (tax_amount >= 0),
     total_amount         NUMERIC(14,2) NOT NULL DEFAULT 0.00 CHECK (total_amount >= 0),
     amount_paid          NUMERIC(14,2) NOT NULL DEFAULT 0.00 CHECK (amount_paid >= 0),
-    -- amount_due: generated column ΓÇö always equals total_amount - amount_paid
+    -- amount_due: generated column — always equals total_amount - amount_paid
     amount_due           NUMERIC(14,2) GENERATED ALWAYS AS (total_amount - amount_paid) STORED,
     currency             TEXT          NOT NULL DEFAULT 'INR'
                              CHECK (char_length(currency) = 3),
     -- Tax snapshot at invoice issue time (mirrors tax_engine.py output)
-    tax_name             TEXT,         -- e.g. "GST 18%" ΓÇö copied from taxes.name at issue time
-    tax_rate             NUMERIC(5,2), -- e.g. 18.00   ΓÇö copied from taxes.rate at issue time
+    tax_name             TEXT,         -- e.g. "GST 18%" — copied from taxes.name at issue time
+    tax_rate             NUMERIC(5,2), -- e.g. 18.00   — copied from taxes.rate at issue time
     notes                TEXT,
     terms_and_conditions TEXT,
     sent_at              TIMESTAMPTZ,
@@ -333,7 +333,7 @@ CREATE INDEX IF NOT EXISTS idx_inv_discount_id      ON invoices (discount_id);
 CREATE INDEX IF NOT EXISTS idx_inv_created_by       ON invoices (created_by);
 
 -- Partial unique index: one LIVE invoice per subscription per billing period.
--- Cancelled and voided invoices are excluded ΓåÆ they can be replaced by a new invoice.
+-- Cancelled and voided invoices are excluded → they can be replaced by a new invoice.
 CREATE UNIQUE INDEX IF NOT EXISTS uix_invoice_live_period
     ON invoices (subscription_id, billing_period_start, billing_period_end)
     WHERE status NOT IN ('cancelled', 'void')
@@ -472,7 +472,7 @@ CREATE INDEX IF NOT EXISTS idx_du_used_at         ON discount_usages (used_at);
 -- =============================================================================
 -- ROW LEVEL SECURITY
 -- Enabled on all 9 new public tables.
--- NO policies are created here ΓÇö the FastAPI service role uses BYPASSRLS.
+-- NO policies are created here — the FastAPI service role uses BYPASSRLS.
 -- Add explicit CREATE POLICY statements in a separate migration file
 -- only when direct PostgREST/client-SDK access is required.
 -- =============================================================================
@@ -490,19 +490,19 @@ ALTER TABLE discount_usages             ENABLE ROW LEVEL SECURITY;
 -- Table comments
 -- =============================================================================
 COMMENT ON TABLE payment_terms
-    IS 'Named payment conditions (Net-30, Due on Receipt, etc.) ΓÇö new table, not in existing 9';
+    IS 'Named payment conditions (Net-30, Due on Receipt, etc.) — new table, not in existing 9';
 COMMENT ON TABLE subscriptions
-    IS 'Core subscription lifecycle; draftΓåÆquotationΓåÆconfirmedΓåÆactiveΓåÆpausedΓåÆclosed';
+    IS 'Core subscription lifecycle; draft→quotation→confirmed→active→paused→closed';
 COMMENT ON COLUMN subscriptions.subscription_number
     IS 'Auto-generated staff-facing reference: SUB-000100';
 COMMENT ON COLUMN subscriptions.quotation_number
     IS 'Customer-facing quotation reference; set on transition to quotation status';
 COMMENT ON COLUMN subscriptions.created_by
-    IS 'References auth.users(id) ΓÇö Supabase Auth identity';
+    IS 'References auth.users(id) — Supabase Auth identity';
 COMMENT ON TABLE subscription_lines
-    IS 'Per-product line items within a subscription; variant_idΓåÆvariants(id)';
+    IS 'Per-product line items within a subscription; variant_id→variants(id)';
 COMMENT ON COLUMN subscription_lines.variant_id
-    IS 'References the live variants table ΓÇö NOT product_variants';
+    IS 'References the live variants table — NOT product_variants';
 COMMENT ON TABLE subscription_status_history
     IS 'Append-only audit log of every subscription status transition';
 COMMENT ON TABLE subscription_discounts
@@ -514,25 +514,25 @@ COMMENT ON COLUMN invoices.amount_due
 COMMENT ON COLUMN invoices.invoice_number
     IS 'Auto-generated from invoice_number_seq: INV-001000';
 COMMENT ON COLUMN invoices.tax_name
-    IS 'Snapshot of taxes.name at invoice issue time ΓÇö historical accuracy';
+    IS 'Snapshot of taxes.name at invoice issue time — historical accuracy';
 COMMENT ON COLUMN invoices.tax_rate
     IS 'Snapshot of taxes.rate (%) at invoice issue time';
 COMMENT ON TABLE invoice_lines
-    IS 'Invoice line items; tax_name/tax_rate are point-in-time snapshots; variant_idΓåÆvariants(id)';
+    IS 'Invoice line items; tax_name/tax_rate are point-in-time snapshots; variant_id→variants(id)';
 COMMENT ON TABLE payments
     IS 'Payment records against invoices; gateway_response stores raw gateway JSON';
 COMMENT ON TABLE discount_usages
     IS 'Per-redemption audit trail; application code must increment discounts.times_used on INSERT';
 
 -- =============================================================================
--- DEPENDENCY REPORT ΓÇö Missing columns / unresolved conflicts
+-- DEPENDENCY REPORT — Missing columns / unresolved conflicts
 --
 -- The items below describe gaps between what database/schema.sql assumes and
 -- what the live Supabase database actually contains.  None of these issues
 -- are fixed by this file.  Each requires a deliberate ALTER TABLE migration
 -- coordinated with the relevant table owner.
 --
--- ΓöÇΓöÇ CONFIRMED COLUMN-NAME MISMATCHES ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+-- ── CONFIRMED COLUMN-NAME MISMATCHES ─────────────────────────────────────────
 --
 -- 1. products.price  vs  schema.sql assumption products.sales_price
 --    The existing products table uses the column name 'price'.
@@ -548,7 +548,7 @@ COMMENT ON TABLE discount_usages
 -- 3. variants (table name)  vs  schema.sql assumption product_variants
 --    The live table is named 'variants'.  schema.sql references 'product_variants'.
 --    remaining_schema.sql correctly references 'variants'; schema.sql is wrong.
---    Resolution: no action needed here ΓÇö remaining_schema.sql uses the correct name.
+--    Resolution: no action needed here — remaining_schema.sql uses the correct name.
 --    Update schema.sql comments/views accordingly.
 --
 -- 4. customers.auth_user_id  vs  schema.sql assumption customers.user_id
@@ -560,43 +560,43 @@ COMMENT ON TABLE discount_usages
 --    The existing column is 'template_id'.  schema.sql assumes 'quotation_template_id'.
 --    Resolution: coordinate with the quotation_template_lines owner.
 --
--- ΓöÇΓöÇ UNKNOWN EXISTING-TABLE COLUMNS (structure not shared with this author) ΓöÇΓöÇΓöÇΓöÇ
+-- ── UNKNOWN EXISTING-TABLE COLUMNS (structure not shared with this author) ────
 --
--- 6. discounts ΓÇö column names unknown beyond 'id'.
+-- 6. discounts — column names unknown beyond 'id'.
 --    schema.sql assumes: code (CITEXT), type, value, is_active, start_date,
 --    end_date, usage_limit, times_used, min_quantity, min_purchase, scope, plan_id.
 --    If the live table is missing these, discount_engine.py will fail.
 --    Action needed: share discounts table DDL with backend core (Aadya).
 --
--- 7. taxes ΓÇö column names unknown beyond 'id'.
+-- 7. taxes — column names unknown beyond 'id'.
 --    schema.sql and tax_engine.py assume: name (TEXT), rate (NUMERIC).
 --    Action needed: share taxes table DDL with backend core.
 --
--- 8. plans ΓÇö columns unknown beyond 'id' and 'interval'.
+-- 8. plans — columns unknown beyond 'id' and 'interval'.
 --    schema.sql assumes: billing_cycle, billing_interval, min_quantity,
 --    auto_close, allow_pause, allow_early_close, renewal_type, price, setup_fee,
 --    trial_days, features, etc.
 --    Action needed: share plans table DDL with backend core.
 --
--- 9. products ΓÇö columns unknown beyond 'id' and 'price'.
---    schema.sql assumes: sales_price (ΓåÆ price), cost_price, code, product_type,
+-- 9. products — columns unknown beyond 'id' and 'price'.
+--    schema.sql assumes: sales_price (→ price), cost_price, code, product_type,
 --    unit_of_measure, tax_id, etc.
 --    Action needed: share products table DDL with backend core.
 --
--- 10. variants ΓÇö columns unknown beyond 'id' and 'extra_price'.
---    schema.sql assumes: price_extra (ΓåÆ extra_price), price_override, product_id,
+-- 10. variants — columns unknown beyond 'id' and 'extra_price'.
+--    schema.sql assumes: price_extra (→ extra_price), price_override, product_id,
 --    code, attributes, etc.
 --    Action needed: share variants table DDL with backend core.
 --
--- ΓöÇΓöÇ TABLES IN schema.sql THAT DO NOT APPLY TO THE LIVE DB ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+-- ── TABLES IN schema.sql THAT DO NOT APPLY TO THE LIVE DB ────────────────────
 --
--- 11. public.users (in schema.sql) ΓÇö DOES NOT EXIST and MUST NOT be created.
+-- 11. public.users (in schema.sql) — DOES NOT EXIST and MUST NOT be created.
 --    The live database uses auth.users (Supabase Auth schema) for identity.
 --    All user-identity FK columns in remaining_schema.sql correctly reference
 --    auth.users(id) instead.
 --    Action: remove or mark the users table in schema.sql as non-applicable.
 --
--- ΓöÇΓöÇ VIEWS IN schema.sql ΓÇö NOT INCLUDED IN remaining_schema.sql ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+-- ── VIEWS IN schema.sql — NOT INCLUDED IN remaining_schema.sql ───────────────
 --
 -- 12. vw_quotations, vw_invoice_balances, vw_subscription_summary
 --    These views were defined in schema.sql but are NOT included here because
@@ -605,9 +605,9 @@ COMMENT ON TABLE discount_usages
 --    is unconfirmed.  Create them in a separate migration file once the existing
 --    table structures are verified.
 --
--- ΓöÇΓöÇ CHANGE_REQUESTS TABLE ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+-- ── CHANGE_REQUESTS TABLE ──────────────────────────────────────────────────────
 --
--- 13. change_requests ΓÇö exists in the live DB but is completely absent from
+-- 13. change_requests — exists in the live DB but is completely absent from
 --    schema.sql.  Its structure, purpose, and FK relationships are unknown.
 --    It may reference customers, plans, subscriptions, or discounts.
 --    Action: share change_requests DDL with backend core (Aadya).
