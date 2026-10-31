@@ -26,7 +26,7 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 fake = Faker("en_IN")
 
-SEED_EMAIL_DOMAIN = "@seed.brightloop.test"
+SEED_EMAIL_DOMAIN = "@brightloop.example.com"
 
 
 def batch_insert(table_name: str, rows: list, batch_size: int = 100):
@@ -112,9 +112,9 @@ def main():
     print(f"Creating users and {num_customers} customers...")
 
     users_to_create = [
-        ("admin", "admin@seed.brightloop.test"),
-        ("staff1", "staff1@seed.brightloop.test"),
-        ("staff2", "staff2@seed.brightloop.test"),
+        ("admin", "admin@brightloop.example.com"),
+        ("staff1", "staff1@brightloop.example.com"),
+        ("staff2", "staff2@brightloop.example.com"),
     ]
 
     for role, email in users_to_create:
