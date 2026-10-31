@@ -11,7 +11,10 @@ import {
   Plus,
   X,
   RefreshCw,
-  WifiOff,
+  Eye,
+  CheckCircle2 as ConfirmIcon,
+  XCircle,
+  RotateCcw,
 } from "lucide-react";
 import { Dialog } from "@base-ui/react/dialog";
 import { cn } from "cn";
@@ -24,37 +27,57 @@ import {
   type ColumnDef,
 } from "@/components/shared";
 import { Button } from "@/components/ui/button";
-import {
-  MOCK_PAYMENTS,
-  type MockPayment,
-  type PaymentMethod,
-} from "@/mocks/payments";
-import { MOCK_INVOICES } from "@/mocks/invoices";
-import { formatCents, formatDate, formatLabel, formatDecimalInr } from "@/lib/format";
-import { apiClient, buildQuery } from "@/lib/api-client";
+import { formatDate, formatLabel } from "@/lib/format";
+import { decimalToMinorUnits, formatMinorUnits } from "@/lib/money";
+import { apiClient, buildQuery, getAllPages } from "@/lib/api-client";
 import { getSupabaseToken } from "@/lib/supabase-token";
-import type { ApiPayment, ApiPaymentMethod, CreatePaymentBody } from "@/types/api";
+import type {
+  ApiCustomer,
+  ApiInvoiceSummary,
+  ApiPayment,
+  ApiPaymentMethod,
+  CreatePaymentBody,
+  PaymentStatus,
+} from "@/types/api";
 
 // ---------------------------------------------------------------------------
 // Adapter — map backend payment to mock shape for table display
 // ---------------------------------------------------------------------------
 
-function adaptPayment(api: ApiPayment): MockPayment {
-  const amountCents = Math.round(parseFloat(api.amount) * 100);
+interface PaymentRow {
+  id: string;
+  reference: string;
+  invoiceId: string;
+  invoiceNumber: string;
+  customerId: string;
+  customerName: string;
+  status: PaymentStatus;
+  method: ApiPaymentMethod;
+  date: string;
+  amount: string;
+  refundedAmount: string;
+  currency: string;
+}
+
+function adaptPayment(
+  api: ApiPayment,
+  invoices: Map<string, ApiInvoiceSummary>,
+  customers: Map<string, ApiCustomer>
+): PaymentRow {
+  const invoice = invoices.get(api.invoice_id);
   return {
     id: api.id,
-    reference: api.payment_reference ?? api.id.slice(0, 8).toUpperCase(),
+    reference: api.payment_reference,
     invoiceId: api.invoice_id,
-    invoiceNumber: api.invoice_number,
+    invoiceNumber: invoice?.invoice_number ?? api.invoice_id,
     customerId: api.customer_id,
-    customerName: api.customer_name,
-    status: api.status as MockPayment["status"],
-    method: api.method as PaymentMethod,
+    customerName: customers.get(api.customer_id)?.name ?? api.customer_id,
+    status: api.status,
+    method: api.method,
     date: api.payment_date,
-    amountCents,
+    amount: api.amount,
+    refundedAmount: api.refunded_amount,
     currency: api.currency,
-    maskedAccount: null,
-    gatewayReference: null,
   };
 }
 
@@ -72,7 +95,7 @@ const recordPaymentSchema = z.object({
     ["bank_transfer", "credit_card", "upi", "cash", "cheque", "other"] as const,
     { error: "Please select a payment method" }
   ),
-  status: z.enum(["pending", "completed", "failed"] as const, {
+  status: z.enum(["pending", "completed"] as const, {
     error: "Please select a status",
   }),
   date: z.string().min(1, "Date is required"),
@@ -86,7 +109,7 @@ type RecordPaymentForm = z.infer<typeof recordPaymentSchema>;
 // Constants
 // ---------------------------------------------------------------------------
 
-type PayStatus = MockPayment["status"];
+type PayStatus = PaymentStatus;
 
 const STATUS_FILTER_OPTIONS: { label: string; value: PayStatus | "all" }[] = [
   { label: "All", value: "all" },
@@ -94,9 +117,10 @@ const STATUS_FILTER_OPTIONS: { label: string; value: PayStatus | "all" }[] = [
   { label: "Pending", value: "pending" },
   { label: "Failed", value: "failed" },
   { label: "Refunded", value: "refunded" },
+  { label: "Partially refunded", value: "partially_refunded" },
 ];
 
-const PAYMENT_METHODS: { label: string; value: PaymentMethod }[] = [
+const PAYMENT_METHODS: { label: string; value: ApiPaymentMethod }[] = [
   { label: "Bank transfer", value: "bank_transfer" },
   { label: "Credit card", value: "credit_card" },
   { label: "UPI", value: "upi" },
@@ -105,7 +129,7 @@ const PAYMENT_METHODS: { label: string; value: PaymentMethod }[] = [
   { label: "Other", value: "other" },
 ];
 
-const METHOD_LABEL: Record<PaymentMethod, string> = {
+const METHOD_LABEL: Record<ApiPaymentMethod, string> = {
   bank_transfer: "Bank transfer",
   credit_card: "Credit card",
   upi: "UPI",
@@ -118,7 +142,7 @@ const METHOD_LABEL: Record<PaymentMethod, string> = {
 // Column definitions
 // ---------------------------------------------------------------------------
 
-function buildColumns(): ColumnDef<MockPayment>[] {
+function buildColumns(onView: (payment: PaymentRow) => void): ColumnDef<PaymentRow>[] {
   return [
     {
       key: "reference",
@@ -143,18 +167,18 @@ function buildColumns(): ColumnDef<MockPayment>[] {
       cell: (row) => <span className="font-medium">{row.customerName}</span>,
     },
     {
-      key: "amountCents",
+      key: "amount",
       header: "Amount",
       cell: (row) => (
         <span className="tabular-nums font-medium">
-          {formatDecimalInr(String(row.amountCents / 100))}
+          {formatMinorUnits(decimalToMinorUnits(row.amount), row.currency)}
         </span>
       ),
     },
     {
       key: "method",
       header: "Method",
-      cell: (row) => METHOD_LABEL[row.method as PaymentMethod] ?? formatLabel(row.method),
+      cell: (row) => METHOD_LABEL[row.method] ?? formatLabel(row.method),
       hideOnMobile: true,
     },
     {
@@ -168,6 +192,11 @@ function buildColumns(): ColumnDef<MockPayment>[] {
       header: "Status",
       cell: (row) => <StatusBadge status={row.status} />,
     },
+    {
+      key: "_actions",
+      header: "",
+      cell: (row) => <Button variant="ghost" size="icon-sm" onClick={() => onView(row)} aria-label={`View payment ${row.reference}`}><Eye className="size-3.5" /></Button>,
+    },
   ];
 }
 
@@ -176,52 +205,58 @@ function buildColumns(): ColumnDef<MockPayment>[] {
 // ---------------------------------------------------------------------------
 
 export default function PaymentsPage() {
-  const [payments, setPayments] = useState<MockPayment[]>(MOCK_PAYMENTS);
+  const [payments, setPayments] = useState<PaymentRow[]>([]);
+  const [invoices, setInvoices] = useState<ApiInvoiceSummary[]>([]);
   const [loading, setLoading] = useState(true);
-  const [usingMock, setUsingMock] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const [statusFilter, setStatusFilter] = useState<PayStatus | "all">("all");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [selectedPayment, setSelectedPayment] = useState<PaymentRow | null>(null);
+  const [selectedDetails, setSelectedDetails] = useState<ApiPayment | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [refundAmount, setRefundAmount] = useState("");
+  const [refundReason, setRefundReason] = useState("");
 
   // ── Fetch from API ───────────────────────────────────────────────────────
   const fetchPayments = useCallback(async () => {
-    setLoading(true);
     try {
       const token = await getSupabaseToken();
-      const qs = buildQuery({ status: statusFilter === "all" ? undefined : statusFilter, limit: 100 });
-      const { data } = await apiClient.get<ApiPayment[]>(
-        `/payments${qs}`,
-        token ? { token } : undefined
-      );
-      if (data && Array.isArray(data)) {
-        setPayments(data.map(adaptPayment));
-        setUsingMock(false);
-      }
-    } catch {
-      setPayments(MOCK_PAYMENTS);
-      setUsingMock(true);
+      setLoading(true);
+      setError(null);
+      const options = token ? { token } : undefined;
+      const path = `/payments${buildQuery({ status: statusFilter === "all" ? undefined : statusFilter })}`;
+      const [paymentData, invoiceData, customerData] = await Promise.all([
+        getAllPages<ApiPayment>(path, 200, options),
+        getAllPages<ApiInvoiceSummary>("/invoices", 200, options),
+        getAllPages<ApiCustomer>("/customers/", 100, options),
+      ]);
+      const invoiceMap = new Map(invoiceData.map((invoice) => [invoice.id, invoice]));
+      const customerMap = new Map(customerData.map((customer) => [customer.id, customer]));
+      setInvoices(invoiceData);
+      setPayments(paymentData.map((payment) => adaptPayment(payment, invoiceMap, customerMap)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load payments.");
+      setPayments([]);
+      setInvoices([]);
     } finally {
       setLoading(false);
     }
   }, [statusFilter]);
 
-  useEffect(() => { fetchPayments(); }, [fetchPayments]);
+  useEffect(() => {
+    void Promise.resolve().then(() => fetchPayments());
+  }, [fetchPayments]);
 
   // ── Filtered list ─────────────────────────────────────────────────────────
-  const filteredPayments = useMemo(
-    () =>
-      statusFilter === "all" || !usingMock
-        ? payments
-        : payments.filter((p) => p.status === statusFilter),
-    [payments, statusFilter, usingMock]
-  );
+  const filteredPayments = payments;
 
   // ── Summary stats ─────────────────────────────────────────────────────────
   const stats = useMemo(() => {
     const collected = payments
-      .filter((p) => p.status === "completed")
-      .reduce((acc, p) => acc + p.amountCents, 0);
+      .filter((payment) => payment.status === "completed" || payment.status === "partially_refunded")
+      .reduce((acc, payment) => acc + decimalToMinorUnits(payment.amount) - decimalToMinorUnits(payment.refundedAmount), 0n);
     const pending = payments.filter((p) => p.status === "pending").length;
     const failed = payments.filter((p) => p.status === "failed").length;
     return { collected, pending, failed, total: payments.length };
@@ -231,53 +266,62 @@ export default function PaymentsPage() {
   async function handleRecordPayment(data: RecordPaymentForm) {
     setSubmitError(null);
 
-    if (!usingMock) {
-      try {
-        const token = await getSupabaseToken();
-        const body: CreatePaymentBody = {
-          invoice_id: data.invoiceId,
-          amount: data.amount,
-          method: data.method as ApiPaymentMethod,
-          status: data.status,
-          payment_date: data.date,
-          payment_reference: data.reference,
-          notes: data.notes,
-        };
-        await apiClient.post("/payments", body, token ? { token } : undefined);
-        await fetchPayments();
-        setDialogOpen(false);
-        return;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "Failed to record payment";
-        setSubmitError(msg);
-        return;
-      }
+    try {
+      const token = await getSupabaseToken();
+      const body: CreatePaymentBody = {
+        invoice_id: data.invoiceId,
+        amount: data.amount,
+        method: data.method,
+        status: data.status,
+        payment_date: data.date,
+        payment_reference: data.reference || undefined,
+        notes: data.notes || undefined,
+      };
+      await apiClient.post("/payments", body, token ? { token } : undefined);
+      await fetchPayments();
+      setDialogOpen(false);
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : "Failed to record payment.");
     }
-
-    // Mock fallback — add to local state
-    const invoice = MOCK_INVOICES.find((i) => i.id === data.invoiceId);
-    const amountCents = Math.round(parseFloat(data.amount) * 100);
-    const nextId = `pay_${String(payments.length + 1).padStart(3, "0")}_new`;
-    const newPayment: MockPayment = {
-      id: nextId,
-      reference: data.reference ?? `PAY-${String(payments.length + 1).padStart(4, "0")}`,
-      invoiceId: data.invoiceId,
-      invoiceNumber: invoice?.invoiceNumber ?? data.invoiceId,
-      customerId: invoice?.customerId ?? "cus_unknown",
-      customerName: invoice?.customerName ?? "Unknown",
-      status: data.status,
-      method: data.method as PaymentMethod,
-      date: data.date,
-      amountCents,
-      currency: "INR",
-      maskedAccount: null,
-      gatewayReference: null,
-    };
-    setPayments((prev) => [newPayment, ...prev]);
-    setDialogOpen(false);
   }
 
-  const columns = useMemo(() => buildColumns(), []);
+  const openPayment = useCallback(async (payment: PaymentRow) => {
+    setSelectedPayment(payment);
+    setSelectedDetails(null);
+    setActionError(null);
+    try {
+      const token = await getSupabaseToken();
+      const { data } = await apiClient.get<ApiPayment>(`/payments/${payment.id}`, token ? { token } : undefined);
+      if (!data) throw new Error("The payment endpoint returned no details.");
+      setSelectedDetails(data);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Failed to load payment details.");
+    }
+  }, []);
+
+  async function paymentAction(action: "confirm" | "fail" | "refund" | "recalculate") {
+    if (!selectedPayment) return;
+    setActionError(null);
+    try {
+      const token = await getSupabaseToken();
+      if (action === "recalculate") {
+        await apiClient.post(`/payments/recalculate/${selectedPayment.invoiceId}`, {}, token ? { token } : undefined);
+      } else {
+        const body = action === "refund"
+          ? { amount: refundAmount || undefined, reason: refundReason || undefined }
+          : {};
+        await apiClient.post(`/payments/${selectedPayment.id}/${action}`, body, token ? { token } : undefined);
+      }
+      await fetchPayments();
+      await openPayment(selectedPayment);
+      setRefundAmount("");
+      setRefundReason("");
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "The payment action failed.");
+    }
+  }
+
+  const columns = useMemo(() => buildColumns(openPayment), [openPayment]);
 
   return (
     <div className="flex flex-col gap-6">
@@ -290,12 +334,6 @@ export default function PaymentsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {usingMock && (
-            <span className="flex items-center gap-1.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 px-2 py-1 text-xs font-medium text-amber-700 dark:text-amber-300">
-              <WifiOff className="size-3" />
-              Demo data
-            </span>
-          )}
           <Button variant="outline" size="sm" onClick={fetchPayments} disabled={loading}>
             <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
             Refresh
@@ -307,11 +345,17 @@ export default function PaymentsPage() {
         </div>
       </div>
 
+      {(error || actionError) && (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          {actionError ?? error}
+        </div>
+      )}
+
       {/* Stats */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatCard
           title="Total collected"
-          value={formatDecimalInr(String(stats.collected / 100))}
+          value={formatMinorUnits(stats.collected)}
           icon={CheckCircle2}
           description={`${stats.total} payment records`}
           trend={{ direction: "up", label: "this period" }}
@@ -341,14 +385,14 @@ export default function PaymentsPage() {
 
       {/* Table */}
       <div className="rounded-xl border border-border bg-card p-4">
-        <DataTable<MockPayment>
+        <DataTable<PaymentRow>
           columns={columns}
           data={filteredPayments}
           rowKey="id"
           pageSize={8}
           searchPlaceholder="Search by customer, invoice, reference…"
           searchKeys={["customerName", "invoiceNumber", "reference", "status"]}
-          emptyMessage={loading ? "Loading…" : "No payments match the current filter."}
+          emptyMessage={loading ? "Loading…" : error ? "Failed to load payments." : "No payments match the current filter."}
           filterControls={
             <div className="flex flex-wrap gap-1">
               {STATUS_FILTER_OPTIONS.map((opt) => (
@@ -371,11 +415,26 @@ export default function PaymentsPage() {
       </div>
 
       {/* Record payment dialog */}
-      <RecordPaymentDialog
-        open={dialogOpen}
-        onOpenChange={setDialogOpen}
-        onSubmit={handleRecordPayment}
-        submitError={submitError}
+      {dialogOpen && (
+        <RecordPaymentDialog
+          open={dialogOpen}
+          onOpenChange={setDialogOpen}
+          onSubmit={handleRecordPayment}
+          submitError={submitError}
+          invoices={invoices}
+        />
+      )}
+      <PaymentDrawer
+        key={selectedPayment?.id ?? ""}
+        payment={selectedPayment}
+        detail={selectedDetails}
+        error={actionError}
+        refundAmount={refundAmount}
+        refundReason={refundReason}
+        onRefundAmountChange={setRefundAmount}
+        onRefundReasonChange={setRefundReason}
+        onClose={() => { setSelectedPayment(null); setSelectedDetails(null); }}
+        onAction={paymentAction}
       />
     </div>
   );
@@ -390,6 +449,7 @@ interface RecordPaymentDialogProps {
   onOpenChange: (open: boolean) => void;
   onSubmit: (data: RecordPaymentForm) => Promise<void>;
   submitError: string | null;
+  invoices: ApiInvoiceSummary[];
 }
 
 function RecordPaymentDialog({
@@ -397,6 +457,7 @@ function RecordPaymentDialog({
   onOpenChange,
   onSubmit,
   submitError,
+  invoices,
 }: RecordPaymentDialogProps) {
   const formId = useId();
 
@@ -408,7 +469,7 @@ function RecordPaymentDialog({
     formState: { errors, isSubmitting },
   } = useForm<RecordPaymentForm>({
     defaultValues: {
-      date: "",
+      date: new Date().toISOString().slice(0, 10),
       method: "bank_transfer",
       status: "completed",
     },
@@ -419,7 +480,7 @@ function RecordPaymentDialog({
     onOpenChange(false);
   }
 
-  function onValid(raw: RecordPaymentForm) {
+  async function onValid(raw: RecordPaymentForm) {
     const result = recordPaymentSchema.safeParse(raw);
     if (!result.success) {
       result.error.issues.forEach((issue) => {
@@ -430,7 +491,7 @@ function RecordPaymentDialog({
       });
       return;
     }
-    onSubmit(result.data);
+    await onSubmit(result.data);
   }
 
   const inputCls =
@@ -493,12 +554,12 @@ function RecordPaymentDialog({
                 aria-invalid={!!errors.invoiceId}
               >
                 <option value="">Select invoice…</option>
-                {MOCK_INVOICES.filter(
-                  (i) => i.status !== "paid" && i.status !== "cancelled"
+                {invoices.filter(
+                  (invoice) => ["sent", "partial", "overdue"].includes(invoice.status)
                 ).map((inv) => (
                   <option key={inv.id} value={inv.id}>
-                    {inv.invoiceNumber} — {inv.customerName} (
-                    {formatCents(inv.totalCents - inv.paidCents, inv.currency)}{" "}
+                    {inv.invoice_number} — {inv.customer_id} (
+                    {formatMinorUnits(decimalToMinorUnits(inv.amount_due), inv.currency)}{" "}
                     due)
                   </option>
                 ))}
@@ -554,7 +615,6 @@ function RecordPaymentDialog({
               >
                 <option value="completed">Completed</option>
                 <option value="pending">Pending</option>
-                <option value="failed">Failed</option>
               </select>
             </FormField>
 
@@ -616,4 +676,88 @@ function RecordPaymentDialog({
       </Dialog.Portal>
     </Dialog.Root>
   );
+}
+
+interface PaymentDrawerProps {
+  payment: PaymentRow | null;
+  detail: ApiPayment | null;
+  error: string | null;
+  refundAmount: string;
+  refundReason: string;
+  onRefundAmountChange: (value: string) => void;
+  onRefundReasonChange: (value: string) => void;
+  onClose: () => void;
+  onAction: (action: "confirm" | "fail" | "refund" | "recalculate") => Promise<void>;
+}
+
+function PaymentDrawer({
+  payment,
+  detail,
+  error,
+  refundAmount,
+  refundReason,
+  onRefundAmountChange,
+  onRefundReasonChange,
+  onClose,
+  onAction,
+}: PaymentDrawerProps) {
+  const [refundFormOpen, setRefundFormOpen] = useState(false);
+  if (!payment) return null;
+
+  return (
+    <Dialog.Root open modal onOpenChange={(open) => { if (!open) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Backdrop className="fixed inset-0 z-40 bg-black/40" />
+        <Dialog.Popup className="fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col bg-card shadow-xl">
+          <div className="flex items-center justify-between border-b border-border px-5 py-4">
+            <div>
+              <Dialog.Title className="text-base font-semibold">{payment.reference}</Dialog.Title>
+              <Dialog.Description className="mt-0.5 text-xs text-muted-foreground">{payment.invoiceNumber} · {payment.customerName}</Dialog.Description>
+            </div>
+            <Dialog.Close render={<button type="button" className="rounded-md p-1.5 text-muted-foreground hover:bg-muted" aria-label="Close"><X className="size-4" /></button>} />
+          </div>
+          <div className="flex-1 space-y-5 overflow-y-auto px-5 py-4">
+            <StatusBadge status={payment.status} />
+            <dl className="grid grid-cols-2 gap-3 text-sm">
+              <DetailRow label="Amount" value={formatMinorUnits(decimalToMinorUnits(payment.amount), payment.currency)} />
+              <DetailRow label="Method" value={formatLabel(payment.method)} />
+              <DetailRow label="Date" value={formatDate(payment.date)} />
+              <DetailRow label="Refunded" value={formatMinorUnits(decimalToMinorUnits(detail?.refunded_amount ?? payment.refundedAmount), payment.currency)} />
+              <DetailRow label="Invoice" value={payment.invoiceNumber} />
+            </dl>
+            {detail ? (
+              <div className="space-y-2 text-sm">
+                <p className="font-medium">Payment details</p>
+                <p className="text-muted-foreground">Payment ID: <span className="font-mono">{detail.id}</span></p>
+                {detail.notes && <p className="whitespace-pre-wrap">{detail.notes}</p>}
+              </div>
+            ) : <p className="text-sm text-muted-foreground">Loading payment details…</p>}
+            {error && <p className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
+            {refundFormOpen && (
+              <div className="space-y-3 rounded-lg border border-border p-3">
+                <p className="text-sm font-medium">Refund (admin only)</p>
+                <label className="block space-y-1 text-sm"><span>Amount (leave blank for full refund)</span><input inputMode="decimal" pattern="\\d+(\\.\\d{1,2})?" value={refundAmount} onChange={(event) => onRefundAmountChange(event.target.value)} className="h-8 w-full rounded-md border border-input bg-background px-3" /></label>
+                <label className="block space-y-1 text-sm"><span>Reason</span><textarea maxLength={1000} value={refundReason} onChange={(event) => onRefundReasonChange(event.target.value)} className="min-h-16 w-full rounded-md border border-input bg-background px-3 py-2" /></label>
+                <Button size="sm" variant="destructive" onClick={() => onAction("refund")}>Submit refund</Button>
+              </div>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2 border-t border-border px-5 py-4">
+            {payment.status === "pending" && <>
+              <Button size="sm" variant="outline" onClick={() => onAction("confirm")}><ConfirmIcon className="size-3.5" /> Confirm</Button>
+              <Button size="sm" variant="destructive" onClick={() => onAction("fail")}><XCircle className="size-3.5" /> Mark failed</Button>
+            </>}
+            {(payment.status === "completed" || payment.status === "partially_refunded") && !refundFormOpen && (
+              <Button size="sm" variant="outline" onClick={() => setRefundFormOpen(true)}><RotateCcw className="size-3.5" /> Refund</Button>
+            )}
+            <Button size="sm" variant="outline" onClick={() => onAction("recalculate")}>Recalculate invoice</Button>
+          </div>
+        </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+function DetailRow({ label, value }: { label: string; value: string }) {
+  return <><dt className="text-muted-foreground">{label}</dt><dd className="font-medium">{value}</dd></>;
 }

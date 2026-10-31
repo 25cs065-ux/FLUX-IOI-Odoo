@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, type FormEvent } from "react";
 import {
   CreditCard,
   CheckCircle2,
@@ -12,7 +12,9 @@ import {
   PlayCircle,
   X,
   RefreshCw,
-  WifiOff,
+  Plus,
+  Send,
+  RotateCw,
 } from "lucide-react";
 import { Dialog } from "@base-ui/react/dialog";
 import { cn } from "cn";
@@ -25,36 +27,89 @@ import {
   type ColumnDef,
 } from "@/components/shared";
 import { Button } from "@/components/ui/button";
-import {
-  MOCK_SUBSCRIPTIONS,
-  type MockSubscription,
-} from "@/mocks/subscriptions";
-import { formatCents, formatDate, formatLabel, formatDecimalInr } from "@/lib/format";
-import { apiClient, buildQuery } from "@/lib/api-client";
+import { formatDate, formatLabel } from "@/lib/format";
+import { decimalToMinorUnits, formatMinorUnits, multiplyMinorUnits } from "@/lib/money";
+import { apiClient, getAllPages } from "@/lib/api-client";
 import { getSupabaseToken } from "@/lib/supabase-token";
-import type { ApiSubscription } from "@/types/api";
+import type {
+  ApiCustomer,
+  ApiPlan,
+  ApiSubscription,
+  ApiSubscriptionSummary,
+  StatusHistory,
+  SubscriptionStatus,
+} from "@/types/api";
 
 // ---------------------------------------------------------------------------
 // Adapter — map backend response to the shape the UI expects
 // ---------------------------------------------------------------------------
 
-function adaptSubscription(api: ApiSubscription): MockSubscription {
-  // Convert decimal string amount to cents for reuse with existing formatCents.
-  const amountCents = Math.round(parseFloat(api.amount) * 100);
+interface SubscriptionRow {
+  id: string;
+  reference: string;
+  customerId: string;
+  customerName: string;
+  planId: string;
+  planName: string;
+  status: SubscriptionStatus;
+  amount: string;
+  currency: string;
+  billingInterval: ApiPlan["interval"] | "unknown";
+  renewable: boolean;
+  startDate: string;
+  nextBillingDate: string | null;
+  closedDate: string | null;
+  autoRenew: boolean;
+  notes: string | null;
+  quantity: string;
+  endDate: string | null;
+}
+
+interface SubscriptionForm {
+  customer_id: string;
+  plan_id: string;
+  start_date: string;
+  end_date: string;
+  quantity: string;
+  notes: string;
+  auto_renew: boolean;
+}
+
+const EMPTY_SUBSCRIPTION_FORM: SubscriptionForm = {
+  customer_id: "",
+  plan_id: "",
+  start_date: new Date().toISOString().slice(0, 10),
+  end_date: "",
+  quantity: "1",
+  notes: "",
+  auto_renew: true,
+};
+
+function adaptSubscription(
+  api: ApiSubscriptionSummary,
+  customers: Map<string, ApiCustomer>,
+  plans: Map<string, ApiPlan>
+): SubscriptionRow {
+  const plan = plans.get(api.plan_id);
   return {
     id: api.id,
-    reference: api.reference,
+    reference: api.subscription_number,
     customerId: api.customer_id,
-    customerName: api.customer_name,
+    customerName: customers.get(api.customer_id)?.name ?? api.customer_id,
     planId: api.plan_id,
-    planName: api.plan_name,
-    status: api.status as MockSubscription["status"],
-    amountCents,
+    planName: plan?.name ?? api.plan_id,
+    status: api.status,
+    amount: api.total_amount,
     currency: api.currency,
-    billingInterval: api.billing_interval as MockSubscription["billingInterval"],
+    billingInterval: plan?.interval ?? "unknown",
+    renewable: plan?.renewable ?? false,
     startDate: api.start_date,
     nextBillingDate: api.next_billing_date,
-    cancelledDate: api.cancelled_date,
+    closedDate: api.closed_at ?? null,
+    autoRenew: api.auto_renew,
+    notes: api.notes,
+    quantity: api.quantity,
+    endDate: api.end_date,
   };
 }
 
@@ -62,7 +117,7 @@ function adaptSubscription(api: ApiSubscription): MockSubscription {
 // Helpers
 // ---------------------------------------------------------------------------
 
-type SubStatus = MockSubscription["status"];
+type SubStatus = SubscriptionStatus;
 
 const STATUS_FILTER_OPTIONS: { label: string; value: SubStatus | "all" }[] = [
   { label: "All", value: "all" },
@@ -75,17 +130,28 @@ const STATUS_FILTER_OPTIONS: { label: string; value: SubStatus | "all" }[] = [
 ];
 
 // Backend action names
-type ActionKind = "activate" | "pause" | "resume" | "close" | "confirm";
+type ActionKind =
+  | "send-quotation"
+  | "confirm"
+  | "activate"
+  | "pause"
+  | "resume"
+  | "close"
+  | "renew";
 
 interface PendingAction {
   kind: ActionKind;
-  sub: MockSubscription;
+  sub: SubscriptionRow;
 }
 
-const ACTION_CONFIG: Record<
-  ActionKind,
-  { title: string; description: (ref: string) => string; confirmLabel: string; destructive: boolean; endpoint: string }
-> = {
+const ACTION_CONFIG: Record<ActionKind, { title: string; description: (ref: string) => string; confirmLabel: string; destructive: boolean; endpoint: string }> = {
+  "send-quotation": {
+    title: "Send quotation",
+    description: (ref) => `Send a quotation for ${ref}.`,
+    confirmLabel: "Send quotation",
+    destructive: false,
+    endpoint: "send-quotation",
+  },
   confirm: {
     title: "Confirm subscription",
     description: (ref) =>
@@ -126,44 +192,22 @@ const ACTION_CONFIG: Record<
     destructive: true,
     endpoint: "close",
   },
+  renew: {
+    title: "Renew subscription",
+    description: (ref) => `Renew ${ref} for another billing term.`,
+    confirmLabel: "Renew",
+    destructive: false,
+    endpoint: "renew",
+  },
 };
-
-// Timeline events derived from subscription data
-interface TimelineEvent {
-  date: string;
-  label: string;
-  colour: string;
-}
-
-function buildTimeline(sub: MockSubscription): TimelineEvent[] {
-  const events: TimelineEvent[] = [
-    { date: sub.startDate, label: "Subscription created", colour: "bg-green-500" },
-  ];
-  if (sub.status === "active") {
-    events.push({ date: sub.startDate, label: "Activated", colour: "bg-blue-500" });
-  }
-  if (sub.status === "confirmed") {
-    events.push({ date: sub.startDate, label: "Confirmed", colour: "bg-blue-400" });
-  }
-  if (sub.status === "quotation" || sub.status === "draft") {
-    events.push({ date: sub.startDate, label: "Awaiting confirmation", colour: "bg-yellow-500" });
-  }
-  if (sub.status === "paused") {
-    events.push({ date: sub.startDate, label: "Paused", colour: "bg-sky-500" });
-  }
-  if (sub.cancelledDate) {
-    events.push({ date: sub.cancelledDate, label: "Closed", colour: "bg-red-500" });
-  }
-  return events;
-}
 
 // ---------------------------------------------------------------------------
 // Column definitions
 // ---------------------------------------------------------------------------
 
 function buildColumns(
-  onView: (sub: MockSubscription) => void
-): ColumnDef<MockSubscription>[] {
+  onView: (sub: SubscriptionRow) => void
+): ColumnDef<SubscriptionRow>[] {
   return [
     {
       key: "reference",
@@ -189,11 +233,11 @@ function buildColumns(
       hideOnMobile: true,
     },
     {
-      key: "amountCents",
+      key: "amount",
       header: "Amount",
       cell: (row) => (
         <span className="tabular-nums">
-          {formatCents(row.amountCents, row.currency)}
+          {formatMinorUnits(decimalToMinorUnits(row.amount), row.currency)}
           <span className="ml-1 text-xs text-muted-foreground">
             /{row.billingInterval.slice(0, 2)}
           </span>
@@ -234,125 +278,185 @@ function buildColumns(
 
 export default function SubscriptionsPage() {
   // ── State ────────────────────────────────────────────────────────────────
-  const [subs, setSubs] = useState<MockSubscription[]>(MOCK_SUBSCRIPTIONS);
+  const [subs, setSubs] = useState<SubscriptionRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [apiError, setApiError] = useState<string | null>(null);
-  const [usingMock, setUsingMock] = useState(false);
 
   const [statusFilter, setStatusFilter] = useState<SubStatus | "all">("all");
-  const [selectedSub, setSelectedSub] = useState<MockSubscription | null>(null);
+  const [selectedSub, setSelectedSub] = useState<SubscriptionRow | null>(null);
+  const [selectedDetails, setSelectedDetails] = useState<ApiSubscription | null>(null);
+  const [history, setHistory] = useState<StatusHistory[]>([]);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [customers, setCustomers] = useState<ApiCustomer[]>([]);
+  const [plans, setPlans] = useState<ApiPlan[]>([]);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [editingSub, setEditingSub] = useState<SubscriptionRow | null>(null);
+  const [subscriptionForm, setSubscriptionForm] = useState<SubscriptionForm>(EMPTY_SUBSCRIPTION_FORM);
 
   // ── Fetch from API ───────────────────────────────────────────────────────
   const fetchSubs = useCallback(async () => {
-    setLoading(true);
-    setApiError(null);
     try {
       const token = await getSupabaseToken();
-      const qs = buildQuery({ status: statusFilter === "all" ? undefined : statusFilter, limit: 100 });
-      const { data } = await apiClient.get<ApiSubscription[]>(
-        `/subscriptions${qs}`,
-        token ? { token } : undefined
-      );
-      if (data && Array.isArray(data)) {
-        setSubs(data.map(adaptSubscription));
-        setUsingMock(false);
+      setLoading(true);
+      setApiError(null);
+      const options = token ? { token } : undefined;
+      const [subscriptionData, customerData, planResponse] = await Promise.all([
+        getAllPages<ApiSubscriptionSummary>("/subscriptions", 200, options),
+        getAllPages<ApiCustomer>("/customers/", 100, options),
+        apiClient.get<ApiPlan[]>("/plans/", options),
+      ]);
+      if (!planResponse.data) {
+        throw new Error("The backend returned an incomplete subscription response.");
       }
-    } catch {
-      // Backend unavailable — fall back to mock data silently
-      setSubs(MOCK_SUBSCRIPTIONS);
-      setUsingMock(true);
+      setCustomers(customerData);
+      setPlans(planResponse.data);
+      const customerMap = new Map(customerData.map((customer) => [customer.id, customer]));
+      const planMap = new Map(planResponse.data.map((plan) => [plan.id, plan]));
+      setSubs(subscriptionData.map((subscription) => adaptSubscription(subscription, customerMap, planMap)));
+    } catch (err) {
+      setApiError(err instanceof Error ? err.message : "Failed to load subscriptions.");
+      setSubs([]);
     } finally {
       setLoading(false);
     }
-  }, [statusFilter]);
+  }, []);
 
-  useEffect(() => { fetchSubs(); }, [fetchSubs]);
+  useEffect(() => {
+    void Promise.resolve().then(() => fetchSubs());
+  }, [fetchSubs]);
 
   // ── Derived ──────────────────────────────────────────────────────────────
   const filteredSubs = useMemo(
-    () =>
-      statusFilter === "all" || !usingMock
-        ? subs
-        : subs.filter((s) => s.status === statusFilter),
-    [subs, statusFilter, usingMock]
+    () => statusFilter === "all" ? subs : subs.filter((sub) => sub.status === statusFilter),
+    [subs, statusFilter]
   );
 
   const stats = useMemo(() => {
     const active = subs.filter((s) => s.status === "active").length;
     const confirmed = subs.filter((s) => s.status === "confirmed").length;
     const paused = subs.filter((s) => s.status === "paused").length;
-    const mrr = subs
-      .filter((s) => s.status === "active" && s.billingInterval === "monthly")
-      .reduce((acc, s) => acc + s.amountCents, 0);
-    const annualAsMrr = subs
-      .filter((s) => s.status === "active" && s.billingInterval === "annual")
-      .reduce((acc, s) => acc + Math.round(s.amountCents / 12), 0);
-    return { active, confirmed, paused, mrr: mrr + annualAsMrr };
+    const mrr = subs.filter((sub) => sub.status === "active").reduce((total, sub) => {
+      const amount = decimalToMinorUnits(sub.amount);
+      if (sub.billingInterval === "daily") return total + amount * 30n;
+      if (sub.billingInterval === "weekly") return total + multiplyMinorUnits(amount, 433n, 100n);
+      if (sub.billingInterval === "yearly") return total + multiplyMinorUnits(amount, 1n, 12n);
+      if (sub.billingInterval === "monthly") return total + amount;
+      return total;
+    }, 0n);
+    return { active, confirmed, paused, mrr };
   }, [subs]);
 
-  // ── Mutations (API with local fallback) ──────────────────────────────────
+  const openSubscription = useCallback(async (sub: SubscriptionRow) => {
+    setSelectedSub(sub);
+    setSelectedDetails(null);
+    setHistory([]);
+    setApiError(null);
+    try {
+      const token = await getSupabaseToken();
+      const options = token ? { token } : undefined;
+      const [detailResponse, historyResponse] = await Promise.all([
+        apiClient.get<ApiSubscription>(`/subscriptions/${sub.id}`, options),
+        apiClient.get<StatusHistory[]>(`/subscriptions/${sub.id}/history`, options),
+      ]);
+      if (!detailResponse.data || !historyResponse.data) {
+        throw new Error("The backend returned incomplete subscription details.");
+      }
+      setSelectedDetails(detailResponse.data);
+      setHistory(historyResponse.data);
+    } catch (err) {
+      setApiError(err instanceof Error ? err.message : "Failed to load subscription details.");
+    }
+  }, []);
+
+  function openCreateDialog() {
+    setEditingSub(null);
+    setSubscriptionForm({
+      ...EMPTY_SUBSCRIPTION_FORM,
+      customer_id: customers[0]?.id ?? "",
+      plan_id: plans.find((plan) => plan.is_active)?.id ?? "",
+    });
+    setCreateOpen(true);
+  }
+
+  function openEditDialog(sub: SubscriptionRow) {
+    setEditingSub(sub);
+    setSubscriptionForm({
+      customer_id: sub.customerId,
+      plan_id: sub.planId,
+      start_date: sub.startDate,
+      end_date: sub.endDate ?? "",
+      quantity: sub.quantity,
+      notes: sub.notes ?? "",
+      auto_renew: sub.autoRenew,
+    });
+    setCreateOpen(true);
+  }
+
+  async function saveSubscription(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setApiError(null);
+    const body = editingSub
+      ? editingSub.status === "draft" || editingSub.status === "quotation"
+        ? {
+            plan_id: subscriptionForm.plan_id,
+            start_date: subscriptionForm.start_date,
+            end_date: subscriptionForm.end_date || null,
+            quantity: subscriptionForm.quantity,
+            notes: subscriptionForm.notes || null,
+            auto_renew: subscriptionForm.auto_renew,
+          }
+        : {
+            notes: subscriptionForm.notes || null,
+            auto_renew: subscriptionForm.auto_renew,
+          }
+      : {
+          customer_id: subscriptionForm.customer_id,
+          plan_id: subscriptionForm.plan_id,
+          start_date: subscriptionForm.start_date,
+          end_date: subscriptionForm.end_date || null,
+          quantity: subscriptionForm.quantity,
+          notes: subscriptionForm.notes || null,
+          auto_renew: subscriptionForm.auto_renew,
+          currency: "INR",
+        };
+    try {
+      if (editingSub) await apiClient.patch(`/subscriptions/${editingSub.id}`, body);
+      else await apiClient.post("/subscriptions", body);
+      setCreateOpen(false);
+      setEditingSub(null);
+      await fetchSubs();
+    } catch (err) {
+      setApiError(err instanceof Error ? err.message : "Unable to save subscription.");
+    }
+  }
+
+  // ── Mutations ────────────────────────────────────────────────────────────
   async function applyAction(action: ActionKind, id: string) {
     setActionLoading(true);
     setActionError(null);
 
-    if (!usingMock) {
-      try {
-        const token = await getSupabaseToken();
-        await apiClient.post(
-          `/subscriptions/${id}/${ACTION_CONFIG[action].endpoint}`,
-          {},
-          token ? { token } : undefined
-        );
-        // Re-fetch to get the canonical updated state
-        await fetchSubs();
-        setPendingAction(null);
-        setSelectedSub(null);
-        setActionLoading(false);
-        return;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "Action failed";
-        setActionError(msg);
-        setActionLoading(false);
-        return;
-      }
+    try {
+      const token = await getSupabaseToken();
+      await apiClient.post(
+        `/subscriptions/${id}/${ACTION_CONFIG[action].endpoint}`,
+        {},
+        token ? { token } : undefined
+      );
+      await fetchSubs();
+      setPendingAction(null);
+      setSelectedSub(null);
+      setSelectedDetails(null);
+      setActionLoading(false);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Action failed.");
+      setActionLoading(false);
     }
-
-    // Mock fallback — update local state
-    const nextStatus: Record<ActionKind, SubStatus> = {
-      confirm: "confirmed",
-      activate: "active",
-      pause: "paused",
-      resume: "active",
-      close: "closed",
-    };
-    setSubs((prev) =>
-      prev.map((s) =>
-        s.id === id
-          ? {
-              ...s,
-              status: nextStatus[action],
-              cancelledDate:
-                action === "close"
-                  ? new Date().toISOString().slice(0, 10)
-                  : s.cancelledDate,
-              nextBillingDate:
-                action === "close" ? null : s.nextBillingDate,
-            }
-          : s
-      )
-    );
-    setSelectedSub((prev) =>
-      prev?.id === id ? { ...prev, status: nextStatus[action] } : prev
-    );
-    setPendingAction(null);
-    setActionLoading(false);
   }
 
   // ── Columns ──────────────────────────────────────────────────────────────
-  const columns = useMemo(() => buildColumns(setSelectedSub), []);
+  const columns = useMemo(() => buildColumns(openSubscription), [openSubscription]);
 
   // ── Render ───────────────────────────────────────────────────────────────
   return (
@@ -366,12 +470,9 @@ export default function SubscriptionsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {usingMock && (
-            <span className="flex items-center gap-1.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 px-2 py-1 text-xs font-medium text-amber-700 dark:text-amber-300">
-              <WifiOff className="size-3" />
-              Demo data
-            </span>
-          )}
+          <Button size="sm" onClick={openCreateDialog}>
+            <Plus className="size-3.5" /> New subscription
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -385,13 +486,13 @@ export default function SubscriptionsPage() {
       </div>
 
       {/* API error banner */}
-      {actionError && (
+      {(apiError || actionError) && (
         <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
           <AlertCircle className="size-4 shrink-0" />
-          {actionError}
+          {actionError ?? apiError}
           <button
             className="ml-auto text-xs underline"
-            onClick={() => setActionError(null)}
+            onClick={() => { setActionError(null); setApiError(null); }}
           >
             Dismiss
           </button>
@@ -408,7 +509,7 @@ export default function SubscriptionsPage() {
         />
         <StatCard
           title="MRR"
-          value={formatDecimalInr(String(stats.mrr / 100))}
+          value={formatMinorUnits(stats.mrr)}
           icon={CreditCard}
           description="Monthly recurring revenue"
         />
@@ -428,14 +529,14 @@ export default function SubscriptionsPage() {
 
       {/* Table */}
       <div className="rounded-xl border border-border bg-card p-4">
-        <DataTable<MockSubscription>
+        <DataTable<SubscriptionRow>
           columns={columns}
           data={filteredSubs}
           rowKey="id"
           pageSize={8}
           searchPlaceholder="Search by customer, plan, reference…"
           searchKeys={["customerName", "planName", "reference", "status"]}
-          emptyMessage={loading ? "Loading…" : "No subscriptions match the current filter."}
+          emptyMessage={loading ? "Loading…" : apiError ? "Failed to load subscriptions." : "No subscriptions match the current filter."}
           filterControls={
             <div className="flex flex-wrap gap-1">
               {STATUS_FILTER_OPTIONS.map((opt) => (
@@ -460,8 +561,11 @@ export default function SubscriptionsPage() {
       {/* Detail Drawer */}
       <SubscriptionDrawer
         sub={selectedSub}
-        onClose={() => setSelectedSub(null)}
+        detail={selectedDetails}
+        history={history}
+        onClose={() => { setSelectedSub(null); setSelectedDetails(null); }}
         onAction={(kind, sub) => setPendingAction({ kind, sub })}
+        onEdit={openEditDialog}
       />
 
       {/* Confirm dialog */}
@@ -480,6 +584,28 @@ export default function SubscriptionsPage() {
           onConfirm={() => applyAction(pendingAction.kind, pendingAction.sub.id)}
         />
       )}
+
+      {createOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <form onSubmit={saveSubscription} className="max-h-[90vh] w-full max-w-xl space-y-4 overflow-y-auto rounded-xl border border-border bg-card p-5 shadow-xl" role="dialog" aria-modal="true" aria-labelledby="subscription-form-title">
+            <div className="flex items-center justify-between">
+              <h2 id="subscription-form-title" className="font-semibold">{editingSub ? `Edit ${editingSub.reference}` : "New subscription"}</h2>
+              <button type="button" className="rounded-md p-1 text-muted-foreground hover:bg-muted" aria-label="Close" onClick={() => setCreateOpen(false)}><X className="size-4" /></button>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {!editingSub && <label className="space-y-1 text-sm"><span>Customer</span><select required value={subscriptionForm.customer_id} onChange={(event) => setSubscriptionForm({ ...subscriptionForm, customer_id: event.target.value })} className="h-8 w-full rounded-md border border-input bg-background px-3"><option value="">Select customer…</option>{customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name} ({customer.email})</option>)}</select></label>}
+              <label className="space-y-1 text-sm"><span>Plan</span><select required value={subscriptionForm.plan_id} onChange={(event) => setSubscriptionForm({ ...subscriptionForm, plan_id: event.target.value })} disabled={!!editingSub && editingSub.status !== "draft" && editingSub.status !== "quotation"} className="h-8 w-full rounded-md border border-input bg-background px-3"><option value="">Select plan…</option>{plans.map((plan) => <option key={plan.id} value={plan.id}>{plan.name} ({plan.interval})</option>)}</select></label>
+              <label className="space-y-1 text-sm"><span>Start date</span><input required type="date" value={subscriptionForm.start_date} onChange={(event) => setSubscriptionForm({ ...subscriptionForm, start_date: event.target.value })} disabled={!!editingSub && editingSub.status !== "draft" && editingSub.status !== "quotation"} className="h-8 w-full rounded-md border border-input bg-background px-3" /></label>
+              <label className="space-y-1 text-sm"><span>End date (optional)</span><input type="date" value={subscriptionForm.end_date} onChange={(event) => setSubscriptionForm({ ...subscriptionForm, end_date: event.target.value })} disabled={!!editingSub && editingSub.status !== "draft" && editingSub.status !== "quotation"} className="h-8 w-full rounded-md border border-input bg-background px-3" /></label>
+              <label className="space-y-1 text-sm"><span>Quantity</span><input required type="number" min="1" step="0.0001" value={subscriptionForm.quantity} onChange={(event) => setSubscriptionForm({ ...subscriptionForm, quantity: event.target.value })} disabled={!!editingSub && editingSub.status !== "draft" && editingSub.status !== "quotation"} className="h-8 w-full rounded-md border border-input bg-background px-3" /></label>
+              <label className="flex items-center gap-2 self-end pb-2 text-sm"><input type="checkbox" checked={subscriptionForm.auto_renew} onChange={(event) => setSubscriptionForm({ ...subscriptionForm, auto_renew: event.target.checked })} />Auto renew</label>
+            </div>
+            <label className="block space-y-1 text-sm"><span>Notes</span><textarea maxLength={2000} value={subscriptionForm.notes} onChange={(event) => setSubscriptionForm({ ...subscriptionForm, notes: event.target.value })} className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2" /></label>
+            {apiError && <p className="text-sm text-destructive">{apiError}</p>}
+            <div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button><Button type="submit">{editingSub ? "Save changes" : "Create draft"}</Button></div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }
@@ -489,33 +615,36 @@ export default function SubscriptionsPage() {
 // ---------------------------------------------------------------------------
 
 interface DrawerProps {
-  sub: MockSubscription | null;
+  sub: SubscriptionRow | null;
+  detail: ApiSubscription | null;
+  history: StatusHistory[];
   onClose: () => void;
-  onAction: (kind: ActionKind, sub: MockSubscription) => void;
+  onAction: (kind: ActionKind, sub: SubscriptionRow) => void;
+  onEdit: (sub: SubscriptionRow) => void;
 }
 
-function SubscriptionDrawer({ sub, onClose, onAction }: DrawerProps) {
+function SubscriptionDrawer({ sub, detail, history, onClose, onAction, onEdit }: DrawerProps) {
   if (!sub) return null;
-
-  const timeline = buildTimeline(sub);
 
   const availableActions: ActionKind[] = (() => {
     switch (sub.status) {
-      case "draft":
+      case "draft": return ["send-quotation", "confirm", "close"];
       case "quotation": return ["confirm", "close"];
       case "confirmed": return ["activate", "close"];
-      case "active": return ["pause", "close"];
+      case "active": return ["pause", "close", ...(sub.renewable ? ["renew" as const] : [])];
       case "paused": return ["resume", "close"];
       default: return [];
     }
   })();
 
   const actionIcons: Partial<Record<ActionKind, React.ReactNode>> = {
+    "send-quotation": <Send className="size-3.5" />,
     confirm: <CheckCircle2 className="size-3.5" />,
     activate: <PlayCircle className="size-3.5" />,
     pause: <PauseCircle className="size-3.5" />,
     resume: <PlayCircle className="size-3.5" />,
     close: <XCircle className="size-3.5" />,
+    renew: <RotateCw className="size-3.5" />,
   };
 
   return (
@@ -566,52 +695,66 @@ function SubscriptionDrawer({ sub, onClose, onAction }: DrawerProps) {
               <DetailRow label="Plan" value={sub.planName} />
               <DetailRow
                 label="Amount"
-                value={`${formatCents(sub.amountCents, sub.currency)} / ${sub.billingInterval}`}
+                value={`${formatMinorUnits(decimalToMinorUnits(detail?.total_amount ?? sub.amount), sub.currency)} / ${sub.billingInterval}`}
               />
               <DetailRow label="Interval" value={formatLabel(sub.billingInterval)} />
               <DetailRow label="Start date" value={formatDate(sub.startDate)} />
+              <DetailRow label="End date" value={formatDate(detail?.end_date ?? sub.endDate)} />
               <DetailRow
                 label="Next billing"
                 value={formatDate(sub.nextBillingDate)}
               />
-              {sub.cancelledDate && (
+              {sub.closedDate && (
                 <DetailRow
                   label="Closed on"
-                  value={formatDate(sub.cancelledDate)}
+                  value={formatDate(sub.closedDate)}
                 />
               )}
             </dl>
 
-            {/* Status timeline */}
+            {detail ? (
+              <div>
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">Line items</h3>
+                <ul className="space-y-2 text-sm">
+                  {detail.lines.map((line) => (
+                    <li key={line.id} className="flex justify-between gap-3">
+                      <span>{line.description} × {line.quantity}</span>
+                      <span className="tabular-nums">{formatMinorUnits(decimalToMinorUnits(line.line_total), sub.currency)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">Loading subscription details…</p>
+            )}
+
             <div>
               <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-3">
-                Timeline
+                Status history
               </h3>
-              <ol className="space-y-2">
-                {timeline.map((ev, i) => (
-                  <li key={i} className="flex items-start gap-3 text-sm">
-                    <span
-                      className={cn(
-                        "mt-1 size-2.5 shrink-0 rounded-full",
-                        ev.colour
-                      )}
-                      aria-hidden="true"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <p className="leading-tight">{ev.label}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {formatDate(ev.date)}
-                      </p>
-                    </div>
-                  </li>
-                ))}
-              </ol>
+              {history.length ? (
+                <ol className="space-y-2">
+                  {history.map((event) => (
+                    <li key={event.id} className="flex items-start gap-3 text-sm">
+                      <span className="mt-1 size-2.5 shrink-0 rounded-full bg-blue-500" aria-hidden="true" />
+                      <div className="flex-1 min-w-0">
+                        <p className="leading-tight">{event.from_status ? `${formatLabel(event.from_status)} → ` : ""}{formatLabel(event.to_status)}</p>
+                        <p className="text-xs text-muted-foreground">{formatDate(event.changed_at)}{event.reason ? ` · ${event.reason}` : ""}</p>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <p className="text-sm text-muted-foreground">{detail ? "No status history is available." : "Loading status history…"}</p>
+              )}
             </div>
           </div>
 
           {/* Footer actions */}
-          {availableActions.length > 0 && (
-            <div className="border-t border-border px-5 py-4 flex flex-wrap gap-2">
+          <div className="border-t border-border px-5 py-4 flex flex-wrap gap-2">
+            {(sub.status === "draft" || sub.status === "quotation") && (
+              <Button variant="outline" size="sm" onClick={() => onEdit(sub)}>Edit</Button>
+            )}
               {availableActions.map((kind) => (
                 <Button
                   key={kind}
@@ -623,8 +766,7 @@ function SubscriptionDrawer({ sub, onClose, onAction }: DrawerProps) {
                   {ACTION_CONFIG[kind].confirmLabel}
                 </Button>
               ))}
-            </div>
-          )}
+          </div>
         </Dialog.Popup>
       </Dialog.Portal>
     </Dialog.Root>

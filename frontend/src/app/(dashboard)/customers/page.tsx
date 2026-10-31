@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { Users, RefreshCw, WifiOff, Search } from "lucide-react";
+import { Users, RefreshCw, Search } from "lucide-react";
 import { cn } from "cn";
 
 import { DataTable, StatusBadge, StatCard, type ColumnDef } from "@/components/shared";
@@ -10,22 +10,13 @@ import { apiClient, buildQuery } from "@/lib/api-client";
 import { getSupabaseToken } from "@/lib/supabase-token";
 import { useDebounce } from "@/hooks/useDebounce";
 import { formatDate } from "@/lib/format";
+import type { ApiCustomer } from "@/types/api";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-interface Customer {
-  id: string;
-  name: string;
-  email: string;
-  phone: string | null;
-  address: string | null;
-  auth_user_id: string | null;
-  role: string;
-  is_active: boolean;
-  created_at: string | null;
-}
+type Customer = ApiCustomer;
 
 // ---------------------------------------------------------------------------
 // Columns
@@ -92,37 +83,35 @@ function buildColumns(): ColumnDef<Customer>[] {
 export default function CustomersPage() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
-  const [usingMock, setUsingMock] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
   const debouncedSearch = useDebounce(searchInput, 400);
 
   const fetchCustomers = useCallback(async () => {
-    setLoading(true);
-    setError(null);
     try {
       const token = await getSupabaseToken();
+      setLoading(true);
+      setError(null);
       const qs = buildQuery({
         search: debouncedSearch || undefined,
         limit: 100,
         offset: 0,
       });
       const { data } = await apiClient.get<Customer[]>(`/customers/${qs}`, token ? { token } : undefined);
-      if (data) {
-        setCustomers(data);
-        setUsingMock(false);
-      }
+      if (!data) throw new Error("The customers endpoint returned no data.");
+      setCustomers(data);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to load customers";
       setError(msg);
       setCustomers([]);
-      setUsingMock(true);
     } finally {
       setLoading(false);
     }
   }, [debouncedSearch]);
 
-  useEffect(() => { fetchCustomers(); }, [fetchCustomers]);
+  useEffect(() => {
+    void Promise.resolve().then(() => fetchCustomers());
+  }, [fetchCustomers]);
 
   const stats = useMemo(() => ({
     total: customers.length,
@@ -142,11 +131,6 @@ export default function CustomersPage() {
           <p className="mt-0.5 text-sm text-muted-foreground">All customer accounts</p>
         </div>
         <div className="flex items-center gap-2">
-          {usingMock && (
-            <span className="flex items-center gap-1.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 px-2 py-1 text-xs font-medium text-amber-700 dark:text-amber-300">
-              <WifiOff className="size-3" /> Offline
-            </span>
-          )}
           <Button variant="outline" size="sm" onClick={fetchCustomers} disabled={loading}>
             <RefreshCw className={cn("size-3.5", loading && "animate-spin")} /> Refresh
           </Button>

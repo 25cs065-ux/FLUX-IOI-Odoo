@@ -1,35 +1,43 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
-import { Package, RefreshCw, WifiOff } from "lucide-react";
+import { useState, useEffect, useCallback, useMemo, type FormEvent } from "react";
+import { Package, RefreshCw, Plus, Pencil, X } from "lucide-react";
 import { cn } from "cn";
 
 import { DataTable, StatusBadge, StatCard, type ColumnDef } from "@/components/shared";
 import { Button } from "@/components/ui/button";
 import { apiClient } from "@/lib/api-client";
 import { getSupabaseToken } from "@/lib/supabase-token";
+import { decimalToMinorUnits, formatMinorUnits } from "@/lib/money";
+import type { ApiVariant } from "@/types/api";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-interface Variant {
-  id: string;
+type Variant = ApiVariant;
+
+interface VariantForm {
   product_id: string;
   name: string;
-  sku_suffix: string | null;
-  extra_price: number;
+  sku_suffix: string;
+  extra_price: string;
   is_active: boolean;
-  base_product_price: number;
-  final_price: number;
-  created_at: string | null;
 }
+
+const EMPTY_FORM: VariantForm = {
+  product_id: "",
+  name: "",
+  sku_suffix: "",
+  extra_price: "0.00",
+  is_active: true,
+};
 
 // ---------------------------------------------------------------------------
 // Columns
 // ---------------------------------------------------------------------------
 
-function buildColumns(): ColumnDef<Variant>[] {
+function buildColumns(onEdit: (variant: Variant) => void): ColumnDef<Variant>[] {
   return [
     {
       key: "name",
@@ -55,7 +63,7 @@ function buildColumns(): ColumnDef<Variant>[] {
       header: "Base price",
       cell: (row) => (
         <span className="tabular-nums">
-          {new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" }).format(row.base_product_price)}
+          {formatMinorUnits(decimalToMinorUnits(row.base_product_price))}
         </span>
       ),
       hideOnMobile: true,
@@ -65,7 +73,7 @@ function buildColumns(): ColumnDef<Variant>[] {
       header: "Extra",
       cell: (row) => (
         <span className="tabular-nums text-muted-foreground">
-          +{new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" }).format(row.extra_price)}
+          +{formatMinorUnits(decimalToMinorUnits(row.extra_price))}
         </span>
       ),
       hideOnMobile: true,
@@ -75,7 +83,7 @@ function buildColumns(): ColumnDef<Variant>[] {
       header: "Final price",
       cell: (row) => (
         <span className="tabular-nums font-medium">
-          {new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" }).format(row.final_price)}
+          {formatMinorUnits(decimalToMinorUnits(row.final_price))}
         </span>
       ),
     },
@@ -84,6 +92,15 @@ function buildColumns(): ColumnDef<Variant>[] {
       header: "Status",
       cell: (row) => (
         <StatusBadge status={row.is_active ? "active" : "closed"} label={row.is_active ? "Active" : "Inactive"} />
+      ),
+    },
+    {
+      key: "_actions",
+      header: "",
+      cell: (row) => (
+        <Button variant="ghost" size="icon-sm" onClick={() => onEdit(row)} aria-label={`Edit ${row.name}`}>
+          <Pencil className="size-3.5" />
+        </Button>
       ),
     },
   ];
@@ -96,30 +113,31 @@ function buildColumns(): ColumnDef<Variant>[] {
 export default function ProductsPage() {
   const [variants, setVariants] = useState<Variant[]>([]);
   const [loading, setLoading] = useState(true);
-  const [usingMock, setUsingMock] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<Variant | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [form, setForm] = useState<VariantForm>(EMPTY_FORM);
 
   const fetchVariants = useCallback(async () => {
-    setLoading(true);
-    setError(null);
     try {
       const token = await getSupabaseToken();
+      setLoading(true);
+      setError(null);
       const { data } = await apiClient.get<Variant[]>("/variants/", token ? { token } : undefined);
-      if (data) {
-        setVariants(data);
-        setUsingMock(false);
-      }
+      if (!data) throw new Error("The variants endpoint returned no data.");
+      setVariants(data);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to load products";
       setError(msg);
       setVariants([]);
-      setUsingMock(true);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => { fetchVariants(); }, [fetchVariants]);
+  useEffect(() => {
+    void Promise.resolve().then(() => fetchVariants());
+  }, [fetchVariants]);
 
   const stats = useMemo(() => ({
     total: variants.length,
@@ -127,7 +145,64 @@ export default function ProductsPage() {
     uniqueProducts: new Set(variants.map((v) => v.product_id)).size,
   }), [variants]);
 
-  const columns = useMemo(() => buildColumns(), []);
+  function openCreate() {
+    setEditing(null);
+    setForm(EMPTY_FORM);
+    setError(null);
+    setDialogOpen(true);
+  }
+
+  async function openEdit(variant: Variant) {
+    setError(null);
+    try {
+      const token = await getSupabaseToken();
+      const { data } = await apiClient.get<Variant>(`/variants/${variant.id}`, token ? { token } : undefined);
+      if (!data) throw new Error("The variant endpoint returned no details.");
+      setEditing(data);
+      setForm({
+        product_id: data.product_id,
+        name: data.name,
+        sku_suffix: data.sku_suffix ?? "",
+        extra_price: String(data.extra_price),
+        is_active: data.is_active,
+      });
+      setDialogOpen(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load variant details.");
+    }
+  }
+
+  async function saveVariant(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    try {
+      const body = editing
+        ? {
+            name: form.name,
+            sku_suffix: form.sku_suffix || null,
+            extra_price: form.extra_price,
+            is_active: form.is_active,
+          }
+        : {
+            product_id: form.product_id,
+            name: form.name,
+            sku_suffix: form.sku_suffix || null,
+            extra_price: form.extra_price,
+            is_active: form.is_active,
+          };
+      if (editing) {
+        await apiClient.patch(`/variants/${editing.id}`, body);
+      } else {
+        await apiClient.post("/variants/", body);
+      }
+      setDialogOpen(false);
+      await fetchVariants();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to save variant.");
+    }
+  }
+
+  const columns = useMemo(() => buildColumns(openEdit), [variants]);
 
   return (
     <div className="flex flex-col gap-6">
@@ -140,11 +215,9 @@ export default function ProductsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {usingMock && (
-            <span className="flex items-center gap-1.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 px-2 py-1 text-xs font-medium text-amber-700 dark:text-amber-300">
-              <WifiOff className="size-3" /> Offline
-            </span>
-          )}
+          <Button size="sm" onClick={openCreate}>
+            <Plus className="size-3.5" /> Add variant
+          </Button>
           <Button variant="outline" size="sm" onClick={fetchVariants} disabled={loading}>
             <RefreshCw className={cn("size-3.5", loading && "animate-spin")} /> Refresh
           </Button>
@@ -177,6 +250,44 @@ export default function ProductsPage() {
           emptyMessage={loading ? "Loading…" : error ? "Failed to load." : "No product variants found."}
         />
       </div>
+
+      {dialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <form onSubmit={saveVariant} className="w-full max-w-lg space-y-4 rounded-xl border border-border bg-card p-5 shadow-xl" role="dialog" aria-modal="true" aria-labelledby="variant-dialog-title">
+            <div className="flex items-center justify-between">
+              <h2 id="variant-dialog-title" className="font-semibold">{editing ? "Edit variant" : "Add variant"}</h2>
+              <button type="button" className="rounded-md p-1 text-muted-foreground hover:bg-muted" aria-label="Close" onClick={() => setDialogOpen(false)}><X className="size-4" /></button>
+            </div>
+            {!editing && (
+              <label className="block space-y-1 text-sm">
+                <span>Product ID</span>
+                <input required value={form.product_id} onChange={(event) => setForm({ ...form, product_id: event.target.value })} className="h-8 w-full rounded-md border border-input bg-background px-3" />
+              </label>
+            )}
+            <label className="block space-y-1 text-sm">
+              <span>Variant name</span>
+              <input required maxLength={100} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} className="h-8 w-full rounded-md border border-input bg-background px-3" />
+            </label>
+            <label className="block space-y-1 text-sm">
+              <span>SKU suffix</span>
+              <input maxLength={50} value={form.sku_suffix} onChange={(event) => setForm({ ...form, sku_suffix: event.target.value })} className="h-8 w-full rounded-md border border-input bg-background px-3" />
+            </label>
+            <label className="block space-y-1 text-sm">
+              <span>Extra price</span>
+              <input required inputMode="decimal" pattern="\\d+(\\.\\d{1,2})?" value={form.extra_price} onChange={(event) => setForm({ ...form, extra_price: event.target.value })} className="h-8 w-full rounded-md border border-input bg-background px-3" />
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={form.is_active} onChange={(event) => setForm({ ...form, is_active: event.target.checked })} />
+              Active
+            </label>
+            {error && <p className="text-sm text-destructive">{error}</p>}
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
+              <Button type="submit">{editing ? "Save changes" : "Create variant"}</Button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }

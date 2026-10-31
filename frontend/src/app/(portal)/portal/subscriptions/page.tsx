@@ -1,45 +1,63 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   CalendarDays,
   Eye,
   CheckCircle2,
   X,
-  WifiOff,
 } from "lucide-react";
 import { Dialog } from "@base-ui/react/dialog";
 import { cn } from "cn";
 
 import { StatusBadge } from "@/components/shared/StatusBadge";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
-import { DEMO_CUSTOMER } from "@/mocks/demo-customer";
-import { MOCK_SUBSCRIPTIONS, type MockSubscription } from "@/mocks/subscriptions";
-import { formatInrCentsFull, formatDate, formatLabel } from "@/lib/format";
-import { apiClient } from "@/lib/api-client";
+import { formatDate, formatLabel } from "@/lib/format";
+import { decimalToMinorUnits, formatMinorUnits } from "@/lib/money";
+import { apiClient, getAllPages } from "@/lib/api-client";
 import { getSupabaseToken } from "@/lib/supabase-token";
-import type { ApiSubscription } from "@/types/api";
+import type { ApiCustomer, ApiPlan, ApiSubscriptionSummary, SubscriptionStatus } from "@/types/api";
 
 // ---------------------------------------------------------------------------
 // Adapter
 // ---------------------------------------------------------------------------
 
-function adaptSubscription(api: ApiSubscription): MockSubscription {
-  const amountCents = Math.round(parseFloat(api.amount) * 100);
+interface PortalSubscription {
+  id: string;
+  reference: string;
+  customerId: string;
+  customerName: string;
+  planId: string;
+  planName: string;
+  status: SubscriptionStatus;
+  amount: string;
+  currency: string;
+  billingInterval: string;
+  startDate: string;
+  nextBillingDate: string | null;
+  closedDate: string | null;
+}
+
+function adaptSubscription(
+  api: ApiSubscriptionSummary,
+  customers: Map<string, ApiCustomer>,
+  plans: Map<string, ApiPlan>
+): PortalSubscription {
+  const plan = plans.get(api.plan_id);
   return {
     id: api.id,
-    reference: api.reference,
+    reference: api.subscription_number,
     customerId: api.customer_id,
-    customerName: api.customer_name,
+    customerName: customers.get(api.customer_id)?.name ?? api.customer_id,
     planId: api.plan_id,
-    planName: api.plan_name,
-    status: api.status as MockSubscription["status"],
-    amountCents,
+    planName: plan?.name ?? api.plan_id,
+    status: api.status,
+    amount: api.total_amount,
     currency: api.currency,
-    billingInterval: api.billing_interval as MockSubscription["billingInterval"],
+    billingInterval: plan?.interval ?? "unknown",
     startDate: api.start_date,
     nextBillingDate: api.next_billing_date,
-    cancelledDate: api.cancelled_date,
+    closedDate: api.closed_at,
   };
 }
 
@@ -48,67 +66,51 @@ function adaptSubscription(api: ApiSubscription): MockSubscription {
 // ---------------------------------------------------------------------------
 
 export default function PortalSubscriptionsPage() {
-  const [subs, setSubs] = useState<MockSubscription[]>([]);
+  const [subs, setSubs] = useState<PortalSubscription[]>([]);
   const [loading, setLoading] = useState(true);
-  const [usingMock, setUsingMock] = useState(false);
-  const [selectedSub, setSelectedSub] = useState<MockSubscription | null>(null);
-  const [confirmingSub, setConfirmingSub] = useState<MockSubscription | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedSub, setSelectedSub] = useState<PortalSubscription | null>(null);
+  const [confirmingSub, setConfirmingSub] = useState<PortalSubscription | null>(null);
   const [confirmError, setConfirmError] = useState<string | null>(null);
 
-  // ── Fetch subscriptions (backend enforces customer isolation) ─────────────
-  useEffect(() => {
-    async function load() {
-      try {
-        const token = await getSupabaseToken();
-        const { data } = await apiClient.get<ApiSubscription[]>(
-          "/subscriptions?limit=100",
-          token ? { token } : undefined
-        );
-        if (data && Array.isArray(data)) {
-          setSubs(data.map(adaptSubscription));
-          setUsingMock(false);
-        }
-      } catch {
-        // Fall back to mock data filtered by demo customer id
-        setSubs(MOCK_SUBSCRIPTIONS.filter((s) => s.customerId === DEMO_CUSTOMER.id));
-        setUsingMock(true);
-      } finally {
-        setLoading(false);
-      }
+  const fetchSubscriptions = useCallback(async () => {
+    try {
+      const token = await getSupabaseToken();
+      setLoading(true);
+      setError(null);
+      const options = token ? { token } : undefined;
+      const [subscriptionData, customerData, planResponse] = await Promise.all([
+        getAllPages<ApiSubscriptionSummary>("/subscriptions", 200, options),
+        getAllPages<ApiCustomer>("/customers/", 100, options),
+        apiClient.get<ApiPlan[]>("/plans/", options),
+      ]);
+      if (!planResponse.data) throw new Error("The plans endpoint returned no data.");
+      const customerMap = new Map(customerData.map((customer) => [customer.id, customer]));
+      const planMap = new Map(planResponse.data.map((plan) => [plan.id, plan]));
+      setSubs(subscriptionData.map((subscription) => adaptSubscription(subscription, customerMap, planMap)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load subscriptions.");
+      setSubs([]);
+    } finally {
+      setLoading(false);
     }
-    load();
   }, []);
 
+  useEffect(() => {
+    void Promise.resolve().then(() => fetchSubscriptions());
+  }, [fetchSubscriptions]);
+
   // ── Confirm quotation (the only write action customers can perform) ───────
-  async function confirmSubscription(sub: MockSubscription) {
+  async function confirmSubscription(sub: PortalSubscription) {
     setConfirmError(null);
 
-    if (!usingMock) {
-      try {
-        const token = await getSupabaseToken();
-        await apiClient.post(
-          `/subscriptions/${sub.id}/confirm`,
-          {},
-          token ? { token } : undefined
-        );
-        // Refresh
-        setSubs((prev) =>
-          prev.map((s) => (s.id === sub.id ? { ...s, status: "confirmed" } : s))
-        );
-        setSelectedSub((prev) =>
-          prev?.id === sub.id ? { ...prev, status: "confirmed" } : prev
-        );
-      } catch (err) {
-        setConfirmError(err instanceof Error ? err.message : "Confirm failed");
-      }
-    } else {
-      // Mock fallback
-      setSubs((prev) =>
-        prev.map((s) => (s.id === sub.id ? { ...s, status: "confirmed" } : s))
-      );
-      setSelectedSub((prev) =>
-        prev?.id === sub.id ? { ...prev, status: "confirmed" } : prev
-      );
+    try {
+      const token = await getSupabaseToken();
+      await apiClient.post(`/subscriptions/${sub.id}/confirm`, {}, token ? { token } : undefined);
+      await fetchSubscriptions();
+      setSelectedSub(null);
+    } catch (err) {
+      setConfirmError(err instanceof Error ? err.message : "Confirm failed");
     }
     setConfirmingSub(null);
   }
@@ -123,19 +125,13 @@ export default function PortalSubscriptionsPage() {
             View your active plans and billing
           </p>
         </div>
-        {usingMock && (
-          <span className="flex items-center gap-1.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 px-2 py-1 text-xs font-medium text-amber-700 dark:text-amber-300">
-            <WifiOff className="size-3" />
-            Demo data
-          </span>
-        )}
       </div>
 
       {/* Error banner */}
-      {confirmError && (
+      {(confirmError || error) && (
         <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive flex items-center justify-between gap-2">
-          {confirmError}
-          <button className="text-xs underline shrink-0" onClick={() => setConfirmError(null)}>
+          {confirmError ?? error}
+          <button className="text-xs underline shrink-0" onClick={() => { setConfirmError(null); setError(null); }}>
             Dismiss
           </button>
         </div>
@@ -191,13 +187,13 @@ export default function PortalSubscriptionsPage() {
 // ---------------------------------------------------------------------------
 
 interface CardProps {
-  sub: MockSubscription;
-  onView: (sub: MockSubscription) => void;
+  sub: PortalSubscription;
+  onView: (sub: PortalSubscription) => void;
   onConfirm: () => void;
 }
 
 function SubscriptionCard({ sub, onView, onConfirm }: CardProps) {
-  const isQuotation = sub.status === "quotation" || sub.status === "draft";
+  const isQuotation = sub.status === "quotation";
 
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-border bg-card p-4">
@@ -212,7 +208,7 @@ function SubscriptionCard({ sub, onView, onConfirm }: CardProps) {
 
       {/* Amount */}
       <p className="text-xl font-semibold tabular-nums">
-        {formatInrCentsFull(sub.amountCents)}
+        {formatMinorUnits(decimalToMinorUnits(sub.amount), sub.currency)}
         <span className="ml-1 text-sm font-normal text-muted-foreground">
           /{sub.billingInterval}
         </span>
@@ -254,15 +250,15 @@ function SubscriptionCard({ sub, onView, onConfirm }: CardProps) {
 // ---------------------------------------------------------------------------
 
 interface DrawerProps {
-  sub: MockSubscription | null;
+  sub: PortalSubscription | null;
   onClose: () => void;
-  onConfirm: (sub: MockSubscription) => void;
+  onConfirm: (sub: PortalSubscription) => void;
 }
 
 function SubscriptionDetailDrawer({ sub, onClose, onConfirm }: DrawerProps) {
   if (!sub) return null;
 
-  const isQuotation = sub.status === "quotation" || sub.status === "draft";
+  const isQuotation = sub.status === "quotation";
 
   return (
     <Dialog.Root open modal onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -304,7 +300,7 @@ function SubscriptionDetailDrawer({ sub, onClose, onConfirm }: DrawerProps) {
             {/* Amount */}
             <div className="rounded-lg bg-muted/50 p-4 text-center">
               <p className="text-2xl font-semibold tabular-nums">
-                {formatInrCentsFull(sub.amountCents)}
+                {formatMinorUnits(decimalToMinorUnits(sub.amount), sub.currency)}
               </p>
               <p className="text-sm text-muted-foreground">
                 per {sub.billingInterval}
@@ -321,10 +317,10 @@ function SubscriptionDetailDrawer({ sub, onClose, onConfirm }: DrawerProps) {
               <dd>{formatDate(sub.startDate)}</dd>
               <dt className="text-muted-foreground">Next billing</dt>
               <dd>{formatDate(sub.nextBillingDate)}</dd>
-              {sub.cancelledDate && (
+              {sub.closedDate && (
                 <>
                   <dt className="text-muted-foreground">Closed</dt>
-                  <dd className="text-destructive">{formatDate(sub.cancelledDate)}</dd>
+                  <dd className="text-destructive">{formatDate(sub.closedDate)}</dd>
                 </>
               )}
             </dl>

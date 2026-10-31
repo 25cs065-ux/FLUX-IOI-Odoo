@@ -1,34 +1,50 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
-import { BarChart2, RefreshCw, WifiOff, CheckCircle2, XCircle } from "lucide-react";
+import { useState, useEffect, useCallback, useMemo, type FormEvent } from "react";
+import { BarChart2, RefreshCw, Plus, Pencil, X, CheckCircle2, XCircle } from "lucide-react";
 import { cn } from "cn";
 
 import { DataTable, StatusBadge, StatCard, type ColumnDef } from "@/components/shared";
 import { Button } from "@/components/ui/button";
 import { apiClient, buildQuery } from "@/lib/api-client";
 import { getSupabaseToken } from "@/lib/supabase-token";
-import { formatDate } from "@/lib/format";
+import { formatDate, formatLabel } from "@/lib/format";
+import { decimalToMinorUnits, formatMinorUnits } from "@/lib/money";
+import type { ApiPlan } from "@/types/api";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-interface Plan {
-  id: string;
+type Plan = ApiPlan;
+
+interface PlanForm {
   name: string;
-  interval: "daily" | "weekly" | "monthly" | "yearly";
-  price: number;
-  min_quantity: number;
-  start_date: string | null;
-  end_date: string | null;
+  interval: Plan["interval"];
+  price: string;
+  min_quantity: string;
+  start_date: string;
+  end_date: string;
   auto_close: boolean;
   closable_early: boolean;
   pausable: boolean;
   renewable: boolean;
   is_active: boolean;
-  created_at: string | null;
 }
+
+const EMPTY_FORM: PlanForm = {
+  name: "",
+  interval: "monthly",
+  price: "0.00",
+  min_quantity: "1",
+  start_date: "",
+  end_date: "",
+  auto_close: false,
+  closable_early: true,
+  pausable: true,
+  renewable: true,
+  is_active: true,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -41,12 +57,8 @@ const INTERVAL_LABEL: Record<string, string> = {
   yearly: "Yearly",
 };
 
-function formatPrice(price: number, interval: string): string {
-  return new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-    minimumFractionDigits: 2,
-  }).format(price) + " / " + (INTERVAL_LABEL[interval] ?? interval).toLowerCase();
+function formatPrice(price: string | number, interval: string): string {
+  return formatMinorUnits(decimalToMinorUnits(price), "INR") + " / " + (INTERVAL_LABEL[interval] ?? interval).toLowerCase();
 }
 
 function BoolIcon({ value }: { value: boolean }) {
@@ -61,7 +73,7 @@ function BoolIcon({ value }: { value: boolean }) {
 // Columns
 // ---------------------------------------------------------------------------
 
-function buildColumns(): ColumnDef<Plan>[] {
+function buildColumns(onEdit: (plan: Plan) => void): ColumnDef<Plan>[] {
   return [
     {
       key: "name",
@@ -106,6 +118,15 @@ function buildColumns(): ColumnDef<Plan>[] {
         <StatusBadge status={row.is_active ? "active" : "closed"} label={row.is_active ? "Active" : "Inactive"} />
       ),
     },
+    {
+      key: "_actions",
+      header: "",
+      cell: (row) => (
+        <Button variant="ghost" size="icon-sm" onClick={() => onEdit(row)} aria-label={`Edit ${row.name}`}>
+          <Pencil className="size-3.5" />
+        </Button>
+      ),
+    },
   ];
 }
 
@@ -116,34 +137,35 @@ function buildColumns(): ColumnDef<Plan>[] {
 export default function PlansPage() {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [loading, setLoading] = useState(true);
-  const [usingMock, setUsingMock] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filterActive, setFilterActive] = useState<boolean | null>(null);
+  const [editing, setEditing] = useState<Plan | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [form, setForm] = useState<PlanForm>(EMPTY_FORM);
 
   const fetchPlans = useCallback(async () => {
-    setLoading(true);
-    setError(null);
     try {
       const token = await getSupabaseToken();
+      setLoading(true);
+      setError(null);
       const qs = buildQuery({
         is_active: filterActive === null ? undefined : filterActive,
       });
       const { data } = await apiClient.get<Plan[]>(`/plans/${qs}`, token ? { token } : undefined);
-      if (data) {
-        setPlans(data);
-        setUsingMock(false);
-      }
+      if (!data) throw new Error("The plans endpoint returned no data.");
+      setPlans(data);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to load plans";
       setError(msg);
       setPlans([]);
-      setUsingMock(true);
     } finally {
       setLoading(false);
     }
   }, [filterActive]);
 
-  useEffect(() => { fetchPlans(); }, [fetchPlans]);
+  useEffect(() => {
+    void Promise.resolve().then(() => fetchPlans());
+  }, [fetchPlans]);
 
   const stats = useMemo(() => ({
     total: plans.length,
@@ -152,7 +174,70 @@ export default function PlansPage() {
     yearly: plans.filter((p) => p.interval === "yearly").length,
   }), [plans]);
 
-  const columns = useMemo(() => buildColumns(), []);
+  function formFromPlan(plan: Plan): PlanForm {
+    return {
+      name: plan.name,
+      interval: plan.interval,
+      price: String(plan.price),
+      min_quantity: String(plan.min_quantity),
+      start_date: plan.start_date ?? "",
+      end_date: plan.end_date ?? "",
+      auto_close: plan.auto_close,
+      closable_early: plan.closable_early,
+      pausable: plan.pausable,
+      renewable: plan.renewable,
+      is_active: plan.is_active,
+    };
+  }
+
+  function openCreate() {
+    setEditing(null);
+    setForm(EMPTY_FORM);
+    setError(null);
+    setDialogOpen(true);
+  }
+
+  async function openEdit(plan: Plan) {
+    setError(null);
+    try {
+      const token = await getSupabaseToken();
+      const { data } = await apiClient.get<Plan>(`/plans/${plan.id}`, token ? { token } : undefined);
+      if (!data) throw new Error("The plan endpoint returned no details.");
+      setEditing(data);
+      setForm(formFromPlan(data));
+      setDialogOpen(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load plan details.");
+    }
+  }
+
+  async function savePlan(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    const body = {
+      name: form.name,
+      interval: form.interval,
+      price: form.price,
+      min_quantity: Number(form.min_quantity),
+      start_date: form.start_date || null,
+      end_date: form.end_date || null,
+      auto_close: form.auto_close,
+      closable_early: form.closable_early,
+      pausable: form.pausable,
+      renewable: form.renewable,
+      is_active: form.is_active,
+    };
+    try {
+      if (editing) await apiClient.patch(`/plans/${editing.id}`, body);
+      else await apiClient.post("/plans/", body);
+      setDialogOpen(false);
+      await fetchPlans();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to save plan.");
+    }
+  }
+
+  const columns = useMemo(() => buildColumns(openEdit), [plans]);
 
   return (
     <div className="flex flex-col gap-6">
@@ -163,11 +248,9 @@ export default function PlansPage() {
           <p className="mt-0.5 text-sm text-muted-foreground">Subscription billing plans</p>
         </div>
         <div className="flex items-center gap-2">
-          {usingMock && (
-            <span className="flex items-center gap-1.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 px-2 py-1 text-xs font-medium text-amber-700 dark:text-amber-300">
-              <WifiOff className="size-3" /> Offline
-            </span>
-          )}
+          <Button size="sm" onClick={openCreate}>
+            <Plus className="size-3.5" /> Add plan
+          </Button>
           <Button variant="outline" size="sm" onClick={fetchPlans} disabled={loading}>
             <RefreshCw className={cn("size-3.5", loading && "animate-spin")} /> Refresh
           </Button>
@@ -207,6 +290,32 @@ export default function PlansPage() {
             </button>
           ))}
         </div>
+
+        {dialogOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+            <form onSubmit={savePlan} className="max-h-[90vh] w-full max-w-xl space-y-4 overflow-y-auto rounded-xl border border-border bg-card p-5 shadow-xl" role="dialog" aria-modal="true" aria-labelledby="plan-dialog-title">
+              <div className="flex items-center justify-between">
+                <h2 id="plan-dialog-title" className="font-semibold">{editing ? "Edit plan" : "Add plan"}</h2>
+                <button type="button" className="rounded-md p-1 text-muted-foreground hover:bg-muted" aria-label="Close" onClick={() => setDialogOpen(false)}><X className="size-4" /></button>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="space-y-1 text-sm"><span>Name</span><input required maxLength={100} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} className="h-8 w-full rounded-md border border-input bg-background px-3" /></label>
+                <label className="space-y-1 text-sm"><span>Billing interval</span><select value={form.interval} onChange={(event) => setForm({ ...form, interval: event.target.value as Plan["interval"] })} className="h-8 w-full rounded-md border border-input bg-background px-3">{Object.entries(INTERVAL_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+                <label className="space-y-1 text-sm"><span>Price</span><input required inputMode="decimal" pattern="\\d+(\\.\\d{1,2})?" value={form.price} onChange={(event) => setForm({ ...form, price: event.target.value })} className="h-8 w-full rounded-md border border-input bg-background px-3" /></label>
+                <label className="space-y-1 text-sm"><span>Minimum quantity</span><input required type="number" min="1" step="1" value={form.min_quantity} onChange={(event) => setForm({ ...form, min_quantity: event.target.value })} className="h-8 w-full rounded-md border border-input bg-background px-3" /></label>
+                <label className="space-y-1 text-sm"><span>Start date</span><input type="date" value={form.start_date} onChange={(event) => setForm({ ...form, start_date: event.target.value })} className="h-8 w-full rounded-md border border-input bg-background px-3" /></label>
+                <label className="space-y-1 text-sm"><span>End date</span><input type="date" value={form.end_date} onChange={(event) => setForm({ ...form, end_date: event.target.value })} className="h-8 w-full rounded-md border border-input bg-background px-3" /></label>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {(["auto_close", "closable_early", "pausable", "renewable", "is_active"] as const).map((field) => (
+                  <label key={field} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form[field]} onChange={(event) => setForm({ ...form, [field]: event.target.checked })} />{formatLabel(field)}</label>
+                ))}
+              </div>
+              {error && <p className="text-sm text-destructive">{error}</p>}
+              <div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button><Button type="submit">{editing ? "Save changes" : "Create plan"}</Button></div>
+            </form>
+          </div>
+        )}
         <DataTable<Plan>
           columns={columns}
           data={plans}

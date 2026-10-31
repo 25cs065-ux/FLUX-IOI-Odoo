@@ -93,26 +93,10 @@ export function formatLabel(raw: string): string {
  * e.g. formatDecimalInr("159.30")      → "₹159.30"
  *      formatDecimalInr("74300000.00") → "₹7.43Cr"
  *
- * Returns "₹0.00" for null, undefined or unparseable values.
+ * Returns "₹0.00" for null or undefined values; invalid decimal strings throw.
  */
 export function formatDecimalInr(value: string | null | undefined): string {
   if (!value) return "₹0.00";
-  const num = parseFloat(value);
-  if (isNaN(num)) return "₹0.00";
-  if (num >= 10_000_000) {
-    return `₹${(num / 10_000_000).toLocaleString("en-IN", {
-      maximumFractionDigits: 1,
-    })}Cr`;
-  }
-  if (num >= 100_000) {
-    return `₹${(num / 100_000).toLocaleString("en-IN", {
-      maximumFractionDigits: 1,
-    })}L`;
-  }
-  return new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(num);
+  return formatMinorUnits(decimalToMinorUnits(value), "INR");
 }
+import { decimalToMinorUnits, formatMinorUnits } from "@/lib/money";

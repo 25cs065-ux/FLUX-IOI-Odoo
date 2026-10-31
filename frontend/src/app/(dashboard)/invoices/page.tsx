@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, type FormEvent } from "react";
 import {
   FileText,
   CheckCircle2,
@@ -12,7 +12,8 @@ import {
   Printer,
   X,
   RefreshCw,
-  WifiOff,
+  Plus,
+  Play,
 } from "lucide-react";
 import { Dialog } from "@base-ui/react/dialog";
 import { cn } from "cn";
@@ -25,32 +26,53 @@ import {
   type ColumnDef,
 } from "@/components/shared";
 import { Button } from "@/components/ui/button";
-import { MOCK_INVOICES, type MockInvoice } from "@/mocks/invoices";
-import { formatCents, formatDate, formatDecimalInr } from "@/lib/format";
-import { apiClient, buildQuery } from "@/lib/api-client";
+import { formatDate } from "@/lib/format";
+import { decimalToMinorUnits, formatMinorUnits } from "@/lib/money";
+import { apiClient, buildQuery, getAllPages } from "@/lib/api-client";
 import { getSupabaseToken } from "@/lib/supabase-token";
-import type { ApiInvoice } from "@/types/api";
+import type {
+  ApiCustomer,
+  ApiInvoice,
+  ApiInvoiceSummary,
+  ApiSubscriptionSummary,
+  InvoiceStatus,
+} from "@/types/api";
 
 // ---------------------------------------------------------------------------
 // Adapter — map backend response to the shape the UI expects
 // ---------------------------------------------------------------------------
 
-function adaptInvoice(api: ApiInvoice): MockInvoice {
-  const totalCents = Math.round(parseFloat(api.total_amount) * 100);
-  const paidCents = Math.round(parseFloat(api.paid_amount) * 100);
+interface InvoiceRow {
+  id: string;
+  invoiceNumber: string;
+  customerId: string;
+  customerName: string;
+  subscriptionId: string | null;
+  status: InvoiceStatus;
+  totalAmount: string;
+  paidAmount: string;
+  amountDue: string;
+  currency: string;
+  issuedDate: string;
+  dueDate: string;
+  paidDate: string | null;
+}
+
+function adaptInvoice(api: ApiInvoiceSummary, customers: Map<string, ApiCustomer>): InvoiceRow {
   return {
     id: api.id,
     invoiceNumber: api.invoice_number,
     customerId: api.customer_id,
-    customerName: api.customer_name,
+    customerName: customers.get(api.customer_id)?.name ?? api.customer_id,
     subscriptionId: api.subscription_id ?? null,
-    status: api.status as MockInvoice["status"],
-    totalCents,
-    paidCents,
+    status: api.status,
+    totalAmount: api.total_amount,
+    paidAmount: api.amount_paid,
+    amountDue: api.amount_due,
     currency: api.currency,
-    issuedDate: api.issued_date ?? "",
-    dueDate: api.due_date ?? "",
-    paidDate: api.paid_date ?? null,
+    issuedDate: api.issue_date,
+    dueDate: api.due_date,
+    paidDate: api.paid_at,
   };
 }
 
@@ -58,7 +80,7 @@ function adaptInvoice(api: ApiInvoice): MockInvoice {
 // Types & constants
 // ---------------------------------------------------------------------------
 
-type InvStatus = MockInvoice["status"];
+type InvStatus = InvoiceStatus;
 
 const STATUS_FILTER_OPTIONS: { label: string; value: InvStatus | "all" }[] = [
   { label: "All", value: "all" },
@@ -76,7 +98,7 @@ type ActionKind = "send" | "cancel" | "void" | "print";
 
 interface PendingAction {
   kind: ActionKind;
-  invoice: MockInvoice;
+  invoice: InvoiceRow;
 }
 
 const ACTION_CONFIG: Record<
@@ -131,8 +153,8 @@ const ACTION_CONFIG: Record<
 // ---------------------------------------------------------------------------
 
 function buildColumns(
-  onView: (inv: MockInvoice) => void
-): ColumnDef<MockInvoice>[] {
+  onView: (inv: InvoiceRow) => void
+): ColumnDef<InvoiceRow>[] {
   return [
     {
       key: "invoiceNumber",
@@ -169,11 +191,11 @@ function buildColumns(
       hideOnMobile: true,
     },
     {
-      key: "totalCents",
+      key: "totalAmount",
       header: "Amount",
       cell: (row) => (
         <span className="tabular-nums font-medium">
-          {formatCents(row.totalCents, row.currency)}
+          {formatMinorUnits(decimalToMinorUnits(row.totalAmount), row.currency)}
         </span>
       ),
     },
@@ -204,62 +226,90 @@ function buildColumns(
 // ---------------------------------------------------------------------------
 
 export default function InvoicesPage() {
-  const [invoices, setInvoices] = useState<MockInvoice[]>(MOCK_INVOICES);
+  const [invoices, setInvoices] = useState<InvoiceRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [usingMock, setUsingMock] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const [statusFilter, setStatusFilter] = useState<InvStatus | "all">("all");
-  const [selectedInvoice, setSelectedInvoice] = useState<MockInvoice | null>(null);
+  const [selectedInvoice, setSelectedInvoice] = useState<InvoiceRow | null>(null);
+  const [selectedDetails, setSelectedDetails] = useState<ApiInvoice | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [customers, setCustomers] = useState<ApiCustomer[]>([]);
+  const [subscriptions, setSubscriptions] = useState<ApiSubscriptionSummary[]>([]);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createMode, setCreateMode] = useState<"manual" | "generate">("manual");
+  const [invoiceForm, setInvoiceForm] = useState({
+    customer_id: "",
+    subscription_id: "",
+    issue_date: "",
+    due_date: "",
+    description: "",
+    unit_price: "",
+    quantity: "1",
+    notes: "",
+  });
+  const [batchMessage, setBatchMessage] = useState<string | null>(null);
 
   // ── Fetch from API ───────────────────────────────────────────────────────
   const fetchInvoices = useCallback(async () => {
-    setLoading(true);
     try {
       const token = await getSupabaseToken();
-      const qs = buildQuery({ status: statusFilter === "all" ? undefined : statusFilter, limit: 100 });
-      const { data } = await apiClient.get<ApiInvoice[]>(
-        `/invoices${qs}`,
-        token ? { token } : undefined
-      );
-      if (data && Array.isArray(data)) {
-        setInvoices(data.map(adaptInvoice));
-        setUsingMock(false);
-      }
-    } catch {
-      setInvoices(MOCK_INVOICES);
-      setUsingMock(true);
+      setLoading(true);
+      setError(null);
+      const options = token ? { token } : undefined;
+      const path = `/invoices${buildQuery({ status: statusFilter === "all" ? undefined : statusFilter })}`;
+      const [invoiceData, customerData, subscriptionData] = await Promise.all([
+        getAllPages<ApiInvoiceSummary>(path, 200, options),
+        getAllPages<ApiCustomer>("/customers/", 100, options),
+        getAllPages<ApiSubscriptionSummary>("/subscriptions", 200, options),
+      ]);
+      setCustomers(customerData);
+      setSubscriptions(subscriptionData);
+      const customerMap = new Map(customerData.map((customer) => [customer.id, customer]));
+      setInvoices(invoiceData.map((invoice) => adaptInvoice(invoice, customerMap)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load invoices.");
+      setInvoices([]);
     } finally {
       setLoading(false);
     }
   }, [statusFilter]);
 
-  useEffect(() => { fetchInvoices(); }, [fetchInvoices]);
+  useEffect(() => {
+    void Promise.resolve().then(() => fetchInvoices());
+  }, [fetchInvoices]);
 
   // ── Filtered list ─────────────────────────────────────────────────────────
-  const filteredInvoices = useMemo(
-    () =>
-      statusFilter === "all" || !usingMock
-        ? invoices
-        : invoices.filter((i) => i.status === statusFilter),
-    [invoices, statusFilter, usingMock]
-  );
+  const filteredInvoices = invoices;
 
   // ── Summary stats ─────────────────────────────────────────────────────────
   const stats = useMemo(() => {
-    const total = invoices.reduce((acc, i) => acc + i.totalCents, 0);
-    // "sent" is the backend equivalent of old "pending"
+    const total = invoices.reduce((acc, invoice) => acc + decimalToMinorUnits(invoice.totalAmount), 0n);
     const outstanding = invoices
-      .filter((i) => i.status === "sent" || i.status === "partial" || i.status === "draft")
-      .reduce((acc, i) => acc + (i.totalCents - i.paidCents), 0);
+      .filter((invoice) => ["sent", "partial", "overdue"].includes(invoice.status))
+      .reduce((acc, invoice) => acc + decimalToMinorUnits(invoice.amountDue), 0n);
     const overdue = invoices
-      .filter((i) => i.status === "overdue")
-      .reduce((acc, i) => acc + i.totalCents, 0);
-    const paidCount = invoices.filter((i) => i.status === "paid").length;
+      .filter((invoice) => invoice.status === "overdue")
+      .reduce((acc, invoice) => acc + decimalToMinorUnits(invoice.amountDue), 0n);
+    const paidCount = invoices.filter((invoice) => invoice.status === "paid").length;
     return { total, outstanding, overdue, paidCount };
   }, [invoices]);
+
+  const openInvoice = useCallback(async (invoice: InvoiceRow) => {
+    setSelectedInvoice(invoice);
+    setSelectedDetails(null);
+    setError(null);
+    try {
+      const token = await getSupabaseToken();
+      const { data } = await apiClient.get<ApiInvoice>(`/invoices/${invoice.id}`, token ? { token } : undefined);
+      if (!data) throw new Error("The invoice endpoint returned no details.");
+      setSelectedDetails(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load invoice details.");
+    }
+  }, []);
 
   // ── Mutations ────────────────────────────────────────────────────────────
   async function applyAction(kind: ActionKind, id: string) {
@@ -272,49 +322,101 @@ export default function InvoicesPage() {
     setActionLoading(true);
     setActionError(null);
 
-    const cfg = ACTION_CONFIG[kind];
-    if (!usingMock && cfg.endpoint) {
-      try {
-        const token = await getSupabaseToken();
-        await apiClient.post(
-          `/invoices/${id}/${cfg.endpoint}`,
+    try {
+      const token = await getSupabaseToken();
+      await apiClient.post(
+        `/invoices/${id}/${ACTION_CONFIG[kind].endpoint}`,
+        {},
+        token ? { token } : undefined
+      );
+      await fetchInvoices();
+      setPendingAction(null);
+      setSelectedInvoice(null);
+      setSelectedDetails(null);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Action failed.");
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  async function runBilling(endpoint: "billing-run" | "mark-overdue") {
+    setError(null);
+    setBatchMessage(null);
+    try {
+      const token = await getSupabaseToken();
+      if (endpoint === "billing-run") {
+        const { data } = await apiClient.post<{
+          created: ApiInvoiceSummary[];
+          recovered: { subscription_id: string; reason: string }[];
+          skipped: { subscription_id: string; reason: string }[];
+          failed: { subscription_id: string; reason: string }[];
+        }>("/invoices/billing-run", {}, token ? { token } : undefined);
+        if (!data) throw new Error("The billing run returned no results.");
+        setBatchMessage(`Billing run: ${data.created.length} created, ${data.recovered.length} recovered, ${data.skipped.length} skipped, ${data.failed.length} failed.`);
+      } else {
+        const { data } = await apiClient.post<{ marked_overdue: string[] }>(
+          "/invoices/mark-overdue",
           {},
           token ? { token } : undefined
         );
-        await fetchInvoices();
-        setPendingAction(null);
-        setSelectedInvoice(null);
-        setActionLoading(false);
-        return;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "Action failed";
-        setActionError(msg);
-        setActionLoading(false);
-        return;
+        if (!data) throw new Error("The overdue run returned no results.");
+        setBatchMessage(`${data.marked_overdue.length} invoice(s) marked overdue.`);
       }
+      await fetchInvoices();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The invoice operation failed.");
     }
-
-    // Mock fallback
-    const nextStatus: Partial<Record<ActionKind, InvStatus>> = {
-      send: "sent",
-      cancel: "cancelled",
-      void: "void",
-    };
-    if (nextStatus[kind]) {
-      setInvoices((prev) =>
-        prev.map((i) =>
-          i.id === id ? { ...i, status: nextStatus[kind]! } : i
-        )
-      );
-      setSelectedInvoice((prev) =>
-        prev?.id === id ? { ...prev, status: nextStatus[kind]! } : prev
-      );
-    }
-    setPendingAction(null);
-    setActionLoading(false);
   }
 
-  const columns = useMemo(() => buildColumns(setSelectedInvoice), []);
+  async function saveInvoice(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    try {
+      const token = await getSupabaseToken();
+      if (createMode === "generate") {
+        if (!invoiceForm.subscription_id) throw new Error("Select a subscription to generate an invoice.");
+        await apiClient.post("/invoices/generate", {
+          subscription_id: invoiceForm.subscription_id,
+          issue_date: invoiceForm.issue_date || undefined,
+        }, token ? { token } : undefined);
+      } else {
+        await apiClient.post("/invoices", {
+          customer_id: invoiceForm.customer_id,
+          subscription_id: invoiceForm.subscription_id || null,
+          issue_date: invoiceForm.issue_date || null,
+          due_date: invoiceForm.due_date || null,
+          currency: "INR",
+          notes: invoiceForm.notes || null,
+          lines: [{
+            description: invoiceForm.description,
+            unit_price: invoiceForm.unit_price,
+            quantity: invoiceForm.quantity,
+          }],
+        }, token ? { token } : undefined);
+      }
+      setCreateOpen(false);
+      await fetchInvoices();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to save invoice.");
+    }
+  }
+
+  const columns = useMemo(() => buildColumns(openInvoice), [openInvoice]);
+
+  async function saveInvoiceNotes(invoiceId: string, notes: string) {
+    setError(null);
+    try {
+      const token = await getSupabaseToken();
+      await apiClient.patch(`/invoices/${invoiceId}`, { notes }, token ? { token } : undefined);
+      const { data } = await apiClient.get<ApiInvoice>(`/invoices/${invoiceId}`, token ? { token } : undefined);
+      if (!data) throw new Error("The updated invoice details were not returned.");
+      setSelectedDetails(data);
+      await fetchInvoices();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to update invoice.");
+    }
+  }
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -328,12 +430,22 @@ export default function InvoicesPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {usingMock && (
-            <span className="flex items-center gap-1.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 px-2 py-1 text-xs font-medium text-amber-700 dark:text-amber-300">
-              <WifiOff className="size-3" />
-              Demo data
-            </span>
-          )}
+          <Button size="sm" onClick={() => {
+            setInvoiceForm((current) => ({
+              ...current,
+              issue_date: new Date().toISOString().slice(0, 10),
+            }));
+            setCreateMode("manual");
+            setCreateOpen(true);
+          }}>
+            <Plus className="size-3.5" /> New invoice
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => runBilling("billing-run")}>
+            <Play className="size-3.5" /> Billing run
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => runBilling("mark-overdue")}>
+            Mark overdue
+          </Button>
           <Button variant="outline" size="sm" onClick={fetchInvoices} disabled={loading}>
             <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
             Refresh
@@ -342,11 +454,11 @@ export default function InvoicesPage() {
       </div>
 
       {/* Action error banner */}
-      {actionError && (
+      {(actionError || error || batchMessage) && (
         <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
           <AlertCircle className="size-4 shrink-0" />
-          {actionError}
-          <button className="ml-auto text-xs underline" onClick={() => setActionError(null)}>
+          {actionError ?? error ?? batchMessage}
+          <button className="ml-auto text-xs underline" onClick={() => { setActionError(null); setError(null); setBatchMessage(null); }}>
             Dismiss
           </button>
         </div>
@@ -356,19 +468,19 @@ export default function InvoicesPage() {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatCard
           title="Total invoiced"
-          value={formatDecimalInr(String(stats.total / 100))}
+          value={formatMinorUnits(stats.total)}
           icon={FileText}
           description={`${invoices.length} invoices`}
         />
         <StatCard
           title="Outstanding"
-          value={formatDecimalInr(String(stats.outstanding / 100))}
+          value={formatMinorUnits(stats.outstanding)}
           icon={Clock}
           trend={{ direction: "neutral", label: "awaiting payment" }}
         />
         <StatCard
           title="Overdue"
-          value={formatDecimalInr(String(stats.overdue / 100))}
+          value={formatMinorUnits(stats.overdue)}
           icon={AlertCircle}
           trend={
             stats.overdue > 0
@@ -386,14 +498,14 @@ export default function InvoicesPage() {
 
       {/* Table */}
       <div className="rounded-xl border border-border bg-card p-4">
-        <DataTable<MockInvoice>
+        <DataTable<InvoiceRow>
           columns={columns}
           data={filteredInvoices}
           rowKey="id"
           pageSize={8}
           searchPlaceholder="Search by invoice #, customer…"
           searchKeys={["invoiceNumber", "customerName", "status"]}
-          emptyMessage={loading ? "Loading…" : "No invoices match the current filter."}
+          emptyMessage={loading ? "Loading…" : error ? "Failed to load invoices." : "No invoices match the current filter."}
           filterControls={
             <div className="flex flex-wrap gap-1">
               {STATUS_FILTER_OPTIONS.map((opt) => (
@@ -417,9 +529,12 @@ export default function InvoicesPage() {
 
       {/* Detail drawer */}
       <InvoiceDrawer
+        key={`${selectedInvoice?.id ?? ""}:${selectedDetails ? "loaded" : "loading"}`}
         invoice={selectedInvoice}
-        onClose={() => setSelectedInvoice(null)}
+        detail={selectedDetails}
+        onClose={() => { setSelectedInvoice(null); setSelectedDetails(null); }}
         onAction={(kind, inv) => setPendingAction({ kind, invoice: inv })}
+        onSaveNotes={saveInvoiceNotes}
       />
 
       {/* Confirm dialog */}
@@ -438,6 +553,36 @@ export default function InvoicesPage() {
           }
         />
       )}
+
+      {createOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <form onSubmit={saveInvoice} className="max-h-[90vh] w-full max-w-xl space-y-4 overflow-y-auto rounded-xl border border-border bg-card p-5 shadow-xl" role="dialog" aria-modal="true" aria-labelledby="invoice-form-title">
+            <div className="flex items-center justify-between">
+              <h2 id="invoice-form-title" className="font-semibold">{createMode === "manual" ? "Create invoice" : "Generate invoice"}</h2>
+              <button type="button" className="rounded-md p-1 text-muted-foreground hover:bg-muted" aria-label="Close" onClick={() => setCreateOpen(false)}><X className="size-4" /></button>
+            </div>
+            <label className="block space-y-1 text-sm"><span>Invoice type</span><select value={createMode} onChange={(event) => setCreateMode(event.target.value as "manual" | "generate")} className="h-8 w-full rounded-md border border-input bg-background px-3"><option value="manual">Manual invoice</option><option value="generate">From subscription</option></select></label>
+            {createMode === "manual" ? (
+              <>
+                <label className="block space-y-1 text-sm"><span>Customer</span><select required value={invoiceForm.customer_id} onChange={(event) => setInvoiceForm({ ...invoiceForm, customer_id: event.target.value })} className="h-8 w-full rounded-md border border-input bg-background px-3"><option value="">Select customer…</option>{customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name} ({customer.email})</option>)}</select></label>
+                <label className="block space-y-1 text-sm"><span>Subscription (optional)</span><select value={invoiceForm.subscription_id} onChange={(event) => setInvoiceForm({ ...invoiceForm, subscription_id: event.target.value })} className="h-8 w-full rounded-md border border-input bg-background px-3"><option value="">None</option>{subscriptions.filter((sub) => sub.customer_id === invoiceForm.customer_id).map((sub) => <option key={sub.id} value={sub.id}>{sub.subscription_number}</option>)}</select></label>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className="space-y-1 text-sm"><span>Description</span><input required maxLength={500} value={invoiceForm.description} onChange={(event) => setInvoiceForm({ ...invoiceForm, description: event.target.value })} className="h-8 w-full rounded-md border border-input bg-background px-3" /></label>
+                  <label className="space-y-1 text-sm"><span>Unit price</span><input required inputMode="decimal" pattern="\\d+(\\.\\d{1,2})?" value={invoiceForm.unit_price} onChange={(event) => setInvoiceForm({ ...invoiceForm, unit_price: event.target.value })} className="h-8 w-full rounded-md border border-input bg-background px-3" /></label>
+                  <label className="space-y-1 text-sm"><span>Quantity</span><input required type="number" min="1" step="0.0001" value={invoiceForm.quantity} onChange={(event) => setInvoiceForm({ ...invoiceForm, quantity: event.target.value })} className="h-8 w-full rounded-md border border-input bg-background px-3" /></label>
+                  <label className="space-y-1 text-sm"><span>Due date</span><input type="date" value={invoiceForm.due_date} onChange={(event) => setInvoiceForm({ ...invoiceForm, due_date: event.target.value })} className="h-8 w-full rounded-md border border-input bg-background px-3" /></label>
+                </div>
+                <label className="block space-y-1 text-sm"><span>Notes</span><textarea maxLength={2000} value={invoiceForm.notes} onChange={(event) => setInvoiceForm({ ...invoiceForm, notes: event.target.value })} className="min-h-16 w-full rounded-md border border-input bg-background px-3 py-2" /></label>
+              </>
+            ) : (
+              <label className="block space-y-1 text-sm"><span>Subscription</span><select required value={invoiceForm.subscription_id} onChange={(event) => setInvoiceForm({ ...invoiceForm, subscription_id: event.target.value })} className="h-8 w-full rounded-md border border-input bg-background px-3"><option value="">Select subscription…</option>{subscriptions.filter((sub) => sub.status === "active").map((sub) => <option key={sub.id} value={sub.id}>{sub.subscription_number}</option>)}</select></label>
+            )}
+            <label className="block space-y-1 text-sm"><span>Issue date</span><input type="date" value={invoiceForm.issue_date} onChange={(event) => setInvoiceForm({ ...invoiceForm, issue_date: event.target.value })} className="h-8 w-full rounded-md border border-input bg-background px-3" /></label>
+            {error && <p className="text-sm text-destructive">{error}</p>}
+            <div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button><Button type="submit">{createMode === "manual" ? "Create draft" : "Generate invoice"}</Button></div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }
@@ -447,12 +592,15 @@ export default function InvoicesPage() {
 // ---------------------------------------------------------------------------
 
 interface InvoiceDrawerProps {
-  invoice: MockInvoice | null;
+  invoice: InvoiceRow | null;
+  detail: ApiInvoice | null;
   onClose: () => void;
-  onAction: (kind: ActionKind, invoice: MockInvoice) => void;
+  onAction: (kind: ActionKind, invoice: InvoiceRow) => void;
+  onSaveNotes: (id: string, notes: string) => Promise<void>;
 }
 
-function InvoiceDrawer({ invoice, onClose, onAction }: InvoiceDrawerProps) {
+function InvoiceDrawer({ invoice, detail, onClose, onAction, onSaveNotes }: InvoiceDrawerProps) {
+  const [notes, setNotes] = useState(detail?.notes ?? "");
   if (!invoice) return null;
 
   // Actions available per backend status
@@ -473,7 +621,9 @@ function InvoiceDrawer({ invoice, onClose, onAction }: InvoiceDrawerProps) {
     print: <Printer className="size-3.5" />,
   };
 
-  const balanceDue = invoice.totalCents - invoice.paidCents;
+  const total = decimalToMinorUnits(invoice.totalAmount);
+  const paid = decimalToMinorUnits(invoice.paidAmount);
+  const balanceDue = decimalToMinorUnits(invoice.amountDue);
 
   return (
     <Dialog.Root open modal onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -519,13 +669,13 @@ function InvoiceDrawer({ invoice, onClose, onAction }: InvoiceDrawerProps) {
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Total</span>
                 <span className="font-semibold tabular-nums">
-                  {formatCents(invoice.totalCents, invoice.currency)}
+                  {formatMinorUnits(total, invoice.currency)}
                 </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Paid</span>
                 <span className="tabular-nums text-green-600 dark:text-green-400">
-                  {formatCents(invoice.paidCents, invoice.currency)}
+                  {formatMinorUnits(paid, invoice.currency)}
                 </span>
               </div>
               <div className="border-t border-border pt-2 flex justify-between font-semibold">
@@ -536,7 +686,7 @@ function InvoiceDrawer({ invoice, onClose, onAction }: InvoiceDrawerProps) {
                     balanceDue > 0 ? "text-destructive" : "text-green-600 dark:text-green-400"
                   )}
                 >
-                  {formatCents(balanceDue, invoice.currency)}
+                  {formatMinorUnits(balanceDue, invoice.currency)}
                 </span>
               </div>
             </div>
@@ -576,6 +726,27 @@ function InvoiceDrawer({ invoice, onClose, onAction }: InvoiceDrawerProps) {
                 </>
               )}
             </dl>
+
+            {detail ? (
+              <>
+                <div>
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Line items</h3>
+                  <ul className="space-y-2 text-sm">
+                    {detail.lines.map((line) => (
+                      <li key={line.id} className="flex justify-between gap-3">
+                        <span>{line.description} × {line.quantity}</span>
+                        <span className="tabular-nums">{formatMinorUnits(decimalToMinorUnits(line.line_total), invoice.currency)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+                <label className="block space-y-1 text-sm">
+                  <span>Notes</span>
+                  <textarea maxLength={2000} value={notes} onChange={(event) => setNotes(event.target.value)} className="min-h-16 w-full rounded-md border border-input bg-background px-3 py-2" />
+                  <Button size="sm" variant="outline" onClick={() => onSaveNotes(invoice.id, notes)}>Save notes</Button>
+                </label>
+              </>
+            ) : <p className="text-sm text-muted-foreground">Loading invoice details…</p>}
 
             <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
               <DollarSign className="size-3.5 shrink-0" />

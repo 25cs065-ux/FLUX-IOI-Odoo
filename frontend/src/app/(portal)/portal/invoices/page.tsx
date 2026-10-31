@@ -1,123 +1,47 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { Printer, X, DollarSign, WifiOff } from "lucide-react";
+import { useState, useEffect, useCallback } from "react";
+import { Printer, X, DollarSign } from "lucide-react";
 import { Dialog } from "@base-ui/react/dialog";
 import { cn } from "cn";
 
 import { DataTable, StatusBadge, type ColumnDef } from "@/components/shared";
-import { DEMO_CUSTOMER } from "@/mocks/demo-customer";
-import { MOCK_INVOICES, type MockInvoice } from "@/mocks/invoices";
-import { formatInrCentsFull, formatDate } from "@/lib/format";
-import { apiClient } from "@/lib/api-client";
+import { formatDate } from "@/lib/format";
+import { decimalToMinorUnits, formatMinorUnits } from "@/lib/money";
+import { apiClient, getAllPages } from "@/lib/api-client";
 import { getSupabaseToken } from "@/lib/supabase-token";
-import type { ApiInvoice } from "@/types/api";
+import type { ApiInvoice, ApiInvoiceSummary, InvoiceStatus } from "@/types/api";
 
 // ---------------------------------------------------------------------------
 // Adapter
 // ---------------------------------------------------------------------------
 
-function adaptInvoice(api: ApiInvoice): MockInvoice {
-  const totalCents = Math.round(parseFloat(api.total_amount) * 100);
-  const paidCents = Math.round(parseFloat(api.paid_amount) * 100);
+interface PortalInvoice {
+  id: string;
+  invoiceNumber: string;
+  status: InvoiceStatus;
+  totalAmount: string;
+  amountPaid: string;
+  amountDue: string;
+  currency: string;
+  issueDate: string;
+  dueDate: string;
+  paidAt: string | null;
+}
+
+function adaptInvoice(api: ApiInvoiceSummary): PortalInvoice {
   return {
     id: api.id,
     invoiceNumber: api.invoice_number,
-    customerId: api.customer_id,
-    customerName: api.customer_name,
-    subscriptionId: api.subscription_id ?? null,
-    status: api.status as MockInvoice["status"],
-    totalCents,
-    paidCents,
+    status: api.status,
+    totalAmount: api.total_amount,
+    amountPaid: api.amount_paid,
+    amountDue: api.amount_due,
     currency: api.currency,
-    issuedDate: api.issued_date ?? "",
-    dueDate: api.due_date ?? "",
-    paidDate: api.paid_date ?? null,
+    issueDate: api.issue_date,
+    dueDate: api.due_date,
+    paidAt: api.paid_at,
   };
-}
-
-// ---------------------------------------------------------------------------
-// Column definitions
-// ---------------------------------------------------------------------------
-
-function buildColumns(
-  onView: (inv: MockInvoice) => void
-): ColumnDef<MockInvoice>[] {
-  return [
-    {
-      key: "invoiceNumber",
-      header: "Invoice #",
-      cell: (row) => (
-        <span className="font-mono text-xs font-medium">{row.invoiceNumber}</span>
-      ),
-    },
-    {
-      key: "issuedDate",
-      header: "Issued",
-      cell: (row) => formatDate(row.issuedDate),
-      hideOnMobile: true,
-    },
-    {
-      key: "dueDate",
-      header: "Due",
-      cell: (row) => (
-        <span
-          className={cn(
-            row.status === "overdue"
-              ? "text-orange-600 dark:text-orange-400 font-medium"
-              : ""
-          )}
-        >
-          {formatDate(row.dueDate)}
-        </span>
-      ),
-      hideOnMobile: true,
-    },
-    {
-      key: "totalCents",
-      header: "Amount",
-      cell: (row) => (
-        <span className="tabular-nums font-medium">
-          {formatInrCentsFull(row.totalCents)}
-        </span>
-      ),
-    },
-    {
-      key: "paidCents",
-      header: "Balance due",
-      cell: (row) => {
-        const balance = row.totalCents - row.paidCents;
-        return (
-          <span
-            className={cn(
-              "tabular-nums",
-              balance > 0 ? "text-destructive font-medium" : "text-green-600 dark:text-green-400"
-            )}
-          >
-            {formatInrCentsFull(balance)}
-          </span>
-        );
-      },
-      hideOnMobile: true,
-    },
-    {
-      key: "status",
-      header: "Status",
-      cell: (row) => <StatusBadge status={row.status} />,
-    },
-    {
-      key: "_view",
-      header: "",
-      cell: (row) => (
-        <button
-          onClick={() => onView(row)}
-          className="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2"
-        >
-          View
-        </button>
-      ),
-    },
-  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -125,51 +49,66 @@ function buildColumns(
 // ---------------------------------------------------------------------------
 
 export default function PortalInvoicesPage() {
-  const [myInvoices, setMyInvoices] = useState<MockInvoice[]>([]);
+  const [myInvoices, setMyInvoices] = useState<PortalInvoice[]>([]);
   const [loading, setLoading] = useState(true);
-  const [usingMock, setUsingMock] = useState(false);
-  const [selectedInvoice, setSelectedInvoice] = useState<MockInvoice | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedInvoice, setSelectedInvoice] = useState<PortalInvoice | null>(null);
+
+  const fetchInvoices = useCallback(async () => {
+    try {
+      const token = await getSupabaseToken();
+      const data = await getAllPages<ApiInvoiceSummary>(
+        "/invoices",
+        200,
+        token ? { token } : undefined
+      );
+      setMyInvoices(data.map(adaptInvoice));
+      setError(null);
+    } catch (err) {
+      setMyInvoices([]);
+      setError(err instanceof Error ? err.message : "Failed to load invoices.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    async function load() {
-      try {
-        const token = await getSupabaseToken();
-        const { data } = await apiClient.get<ApiInvoice[]>(
-          "/invoices?limit=100",
-          token ? { token } : undefined
-        );
-        if (data && Array.isArray(data)) {
-          setMyInvoices(data.map(adaptInvoice));
-          setUsingMock(false);
-        }
-      } catch {
-        setMyInvoices(MOCK_INVOICES.filter((i) => i.customerId === DEMO_CUSTOMER.id));
-        setUsingMock(true);
-      } finally {
-        setLoading(false);
-      }
+    void Promise.resolve().then(() => fetchInvoices());
+  }, [fetchInvoices]);
+
+  async function viewInvoice(invoice: PortalInvoice) {
+    setSelectedInvoice(invoice);
+    try {
+      const token = await getSupabaseToken();
+      const { data } = await apiClient.get<ApiInvoice>(
+        `/invoices/${invoice.id}`,
+        token ? { token } : undefined
+      );
+      if (!data) throw new Error("The invoice details endpoint returned no data.");
+      setSelectedInvoice(adaptInvoice(data));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load invoice details.");
     }
-    load();
-  }, []);
+  }
 
   const columns = [
     {
       key: "invoiceNumber",
       header: "Invoice #",
-      cell: (row: MockInvoice) => (
+      cell: (row: PortalInvoice) => (
         <span className="font-mono text-xs font-medium">{row.invoiceNumber}</span>
       ),
     },
     {
-      key: "issuedDate",
+      key: "issueDate",
       header: "Issued",
-      cell: (row: MockInvoice) => formatDate(row.issuedDate),
+      cell: (row: PortalInvoice) => formatDate(row.issueDate),
       hideOnMobile: true,
     },
     {
       key: "dueDate",
       header: "Due",
-      cell: (row: MockInvoice) => (
+      cell: (row: PortalInvoice) => (
         <span className={cn(row.status === "overdue" ? "text-orange-600 dark:text-orange-400 font-medium" : "")}>
           {formatDate(row.dueDate)}
         </span>
@@ -177,20 +116,22 @@ export default function PortalInvoicesPage() {
       hideOnMobile: true,
     },
     {
-      key: "totalCents",
+      key: "totalAmount",
       header: "Amount",
-      cell: (row: MockInvoice) => (
-        <span className="tabular-nums font-medium">{formatInrCentsFull(row.totalCents)}</span>
+      cell: (row: PortalInvoice) => (
+        <span className="tabular-nums font-medium">
+          {formatMinorUnits(decimalToMinorUnits(row.totalAmount), row.currency)}
+        </span>
       ),
     },
     {
-      key: "paidCents",
+      key: "amountDue",
       header: "Balance due",
-      cell: (row: MockInvoice) => {
-        const balance = row.totalCents - row.paidCents;
+      cell: (row: PortalInvoice) => {
+        const balance = decimalToMinorUnits(row.amountDue);
         return (
           <span className={cn("tabular-nums", balance > 0 ? "text-destructive font-medium" : "text-green-600 dark:text-green-400")}>
-            {formatInrCentsFull(balance)}
+            {formatMinorUnits(balance, row.currency)}
           </span>
         );
       },
@@ -199,22 +140,23 @@ export default function PortalInvoicesPage() {
     {
       key: "status",
       header: "Status",
-      cell: (row: MockInvoice) => <StatusBadge status={row.status} />,
+      cell: (row: PortalInvoice) => <StatusBadge status={row.status} />,
     },
     {
       key: "_view",
       header: "",
-      cell: (row: MockInvoice) => (
-        <button onClick={() => setSelectedInvoice(row)} className="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2">
+      cell: (row: PortalInvoice) => (
+        <button onClick={() => void viewInvoice(row)} className="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2">
           View
         </button>
       ),
     },
-  ] satisfies ColumnDef<MockInvoice>[];
+  ] satisfies ColumnDef<PortalInvoice>[];
 
-  const outstandingCents = myInvoices
+  const outstanding = myInvoices
     .filter((i) => i.status === "sent" || i.status === "overdue" || i.status === "partial")
-    .reduce((acc, i) => acc + (i.totalCents - i.paidCents), 0);
+    .reduce((acc, i) => acc + decimalToMinorUnits(i.amountDue), 0n);
+  const currency = myInvoices[0]?.currency ?? "INR";
 
   return (
     <div className="flex flex-col gap-6">
@@ -226,21 +168,23 @@ export default function PortalInvoicesPage() {
             View and download your invoices
           </p>
         </div>
-        {usingMock && (
-          <span className="flex items-center gap-1.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 px-2 py-1 text-xs font-medium text-amber-700 dark:text-amber-300">
-            <WifiOff className="size-3" />
-            Demo data
-          </span>
-        )}
       </div>
 
       {/* Outstanding notice */}
-      {outstandingCents > 0 && (
+      {error && (
+        <div className="flex items-center justify-between gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          <span>{error}</span>
+          <button className="shrink-0 text-xs underline" onClick={() => void fetchInvoices()}>
+            Retry
+          </button>
+        </div>
+      )}
+      {outstanding > 0n && (
         <div className="flex items-center gap-2 rounded-lg border border-orange-200 bg-orange-50 dark:border-orange-900 dark:bg-orange-950/30 px-4 py-3 text-sm">
           <DollarSign className="size-4 shrink-0 text-orange-600 dark:text-orange-400" />
           <span>
             You have{" "}
-            <strong>{formatInrCentsFull(outstandingCents)}</strong> in
+            <strong>{formatMinorUnits(outstanding, currency)}</strong> in
             outstanding invoices.
           </span>
         </div>
@@ -248,7 +192,7 @@ export default function PortalInvoicesPage() {
 
       {/* Table */}
       <div className="rounded-xl border border-border bg-card p-4">
-        <DataTable<MockInvoice>
+        <DataTable<PortalInvoice>
           columns={columns}
           data={myInvoices}
           rowKey="id"
@@ -273,14 +217,14 @@ export default function PortalInvoicesPage() {
 // ---------------------------------------------------------------------------
 
 interface DrawerProps {
-  invoice: MockInvoice | null;
+  invoice: PortalInvoice | null;
   onClose: () => void;
 }
 
 function InvoiceDetailDrawer({ invoice, onClose }: DrawerProps) {
   if (!invoice) return null;
 
-  const balanceDue = invoice.totalCents - invoice.paidCents;
+  const balanceDue = decimalToMinorUnits(invoice.amountDue);
 
   return (
     <Dialog.Root open modal onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -300,7 +244,7 @@ function InvoiceDetailDrawer({ invoice, onClose }: DrawerProps) {
                 {invoice.invoiceNumber}
               </Dialog.Title>
               <Dialog.Description className="mt-0.5 text-xs text-muted-foreground">
-                Issued {formatDate(invoice.issuedDate)}
+                Issued {formatDate(invoice.issueDate)}
               </Dialog.Description>
             </div>
             <Dialog.Close
@@ -324,13 +268,13 @@ function InvoiceDetailDrawer({ invoice, onClose }: DrawerProps) {
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Invoice total</span>
                 <span className="font-semibold tabular-nums">
-                  {formatInrCentsFull(invoice.totalCents)}
+                  {formatMinorUnits(decimalToMinorUnits(invoice.totalAmount), invoice.currency)}
                 </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Paid</span>
                 <span className="tabular-nums text-green-600 dark:text-green-400">
-                  {formatInrCentsFull(invoice.paidCents)}
+                  {formatMinorUnits(decimalToMinorUnits(invoice.amountPaid), invoice.currency)}
                 </span>
               </div>
               <div className="border-t border-border pt-2 flex justify-between font-semibold">
@@ -343,7 +287,7 @@ function InvoiceDetailDrawer({ invoice, onClose }: DrawerProps) {
                       : "text-green-600 dark:text-green-400"
                   )}
                 >
-                  {formatInrCentsFull(balanceDue)}
+                  {formatMinorUnits(balanceDue, invoice.currency)}
                 </span>
               </div>
             </div>
@@ -351,7 +295,7 @@ function InvoiceDetailDrawer({ invoice, onClose }: DrawerProps) {
             {/* Details */}
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
               <dt className="text-muted-foreground">Issue date</dt>
-              <dd>{formatDate(invoice.issuedDate)}</dd>
+              <dd>{formatDate(invoice.issueDate)}</dd>
               <dt className="text-muted-foreground">Due date</dt>
               <dd
                 className={cn(
@@ -362,11 +306,11 @@ function InvoiceDetailDrawer({ invoice, onClose }: DrawerProps) {
               >
                 {formatDate(invoice.dueDate)}
               </dd>
-              {invoice.paidDate && (
+              {invoice.paidAt && (
                 <>
                   <dt className="text-muted-foreground">Paid on</dt>
                   <dd className="text-green-600 dark:text-green-400">
-                    {formatDate(invoice.paidDate)}
+                    {formatDate(invoice.paidAt)}
                   </dd>
                 </>
               )}
@@ -377,13 +321,13 @@ function InvoiceDetailDrawer({ invoice, onClose }: DrawerProps) {
           <div className="border-t border-border px-5 py-4">
             <button
               className="flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium border border-border hover:bg-muted transition-colors w-full justify-center"
-              onClick={() => alert("PDF download is not available in demo mode.")}
+              onClick={() => window.print()}
             >
               <Printer className="size-4" />
               Print / Download PDF
             </button>
             <p className="mt-2 text-center text-xs text-muted-foreground">
-              Download not available in demo mode.
+              Use your browser&apos;s print dialog to save a PDF.
             </p>
           </div>
         </Dialog.Popup>

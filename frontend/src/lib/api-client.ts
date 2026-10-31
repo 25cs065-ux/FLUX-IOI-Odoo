@@ -159,12 +159,23 @@ async function parseBody<T>(response: Response): Promise<T | null> {
  *   - Shape B (business rule): plain string
  */
 function parseDetail(
-  detail: string | Array<{ msg?: string; message?: string }> | undefined
+  detail:
+    | string
+    | Array<{ msg?: string; message?: string; loc?: Array<string | number> }>
+    | undefined
 ): string | undefined {
   if (!detail) return undefined;
   if (typeof detail === "string") return detail;
   if (Array.isArray(detail)) {
-    return detail.map((d) => d.msg ?? d.message ?? "Validation error").join("; ");
+    return detail
+      .map((item) => {
+        const location = item.loc
+          ?.filter((part) => !["body", "query", "path"].includes(String(part)))
+          .join(".");
+        const message = item.msg ?? item.message ?? "Validation error";
+        return location ? `${location}: ${message}` : message;
+      })
+      .join("; ");
   }
   return undefined;
 }
@@ -189,46 +200,59 @@ async function request<T>(
 ): Promise<{ data: T | null; status: number }> {
   const url = `${getBaseUrl()}${path}`;
 
+  let token = options?.token;
+  if (!token && typeof window !== "undefined") {
+    const { getSupabaseToken } = await import("@/lib/supabase-token");
+    token = (await getSupabaseToken()) ?? undefined;
+  }
+
+  if (!token) {
+    const { refreshSupabaseSession } = await import("@/lib/supabase-token");
+    const session = await refreshSupabaseSession();
+    if (session?.access_token) {
+      return request<T>(method, path, body, {
+        ...options,
+        token: session.access_token,
+        _isRetry: true,
+      });
+    }
+    await signOutAndRedirect();
+    throw new ApiError(401, "Session expired. Please sign in again.");
+  }
+
+  const requestOptions = { ...options, token };
   let response: Response;
 
   try {
     response = await fetch(url, {
       method,
-      headers: buildHeaders(options),
+      headers: buildHeaders(requestOptions),
       body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: options?.signal,
+      signal: requestOptions.signal,
     });
-  } catch (err) {
-    const message =
-      err instanceof Error ? err.message : "Network request failed";
-    throw new ApiError(0, message);
+  } catch {
+    throw new ApiError(
+      0,
+      `Unable to connect to the backend at ${getBaseUrl()}. Check that it is running and try again.`
+    );
   }
 
   // ── 401: token expired — attempt one refresh + retry ────────────────────
-  if (response.status === 401 && !options?._isRetry) {
-    const { refreshSupabaseSession, supabase } = await import("@/lib/supabase-token").then(
-      async (mod) => ({
-        refreshSupabaseSession: mod.refreshSupabaseSession,
-        supabase: (await import("@/lib/supabase")).supabase,
-      })
-    );
+  if (response.status === 401 && !requestOptions._isRetry) {
+    const { refreshSupabaseSession } = await import("@/lib/supabase-token");
 
     const newSession = await refreshSupabaseSession();
 
     if (newSession?.access_token) {
       // Retry exactly once with the fresh token.
       return request<T>(method, path, body, {
-        ...options,
+        ...requestOptions,
         token: newSession.access_token,
         _isRetry: true,
       });
     }
 
-    // Refresh failed — sign out and redirect to login.
-    if (typeof window !== "undefined") {
-      await supabase.auth.signOut();
-      window.location.replace("/login");
-    }
+    await signOutAndRedirect();
     throw new ApiError(401, "Session expired. Please sign in again.");
   }
 
@@ -246,7 +270,7 @@ async function request<T>(
     try {
       const errorBody = await parseBody<{
         message?: string;
-        detail?: string | Array<{ msg?: string; message?: string }>;
+        detail?: string | Array<{ msg?: string; message?: string; loc?: Array<string | number> }>;
       }>(response);
       serverMessage =
         errorBody?.message ?? parseDetail(errorBody?.detail) ?? undefined;
@@ -255,7 +279,7 @@ async function request<T>(
     }
 
     if (response.status === 401) {
-      // _isRetry was true — the retry also got 401.
+      await signOutAndRedirect();
       throw new ApiError(401, serverMessage ?? "Unauthorized. Please sign in.");
     }
 
@@ -282,6 +306,13 @@ async function request<T>(
 
   const data = await parseBody<T>(response);
   return { data, status: response.status };
+}
+
+async function signOutAndRedirect(): Promise<void> {
+  if (typeof window === "undefined") return;
+  const { supabase } = await import("@/lib/supabase");
+  await supabase.auth.signOut();
+  window.location.replace("/login");
 }
 
 // ---------------------------------------------------------------------------
@@ -314,3 +345,26 @@ export const apiClient = {
     return request<T>("DELETE", path, body, options);
   },
 } as const;
+
+export async function getAllPages<T>(
+  path: string,
+  pageSize = 200,
+  options?: RequestOptions
+): Promise<T[]> {
+  const items: T[] = [];
+  let offset = 0;
+
+  while (true) {
+    const pagination = buildQuery({ limit: pageSize, offset });
+    const query = pagination.slice(1);
+    const separator = path.includes("?") ? "&" : "";
+    const { data } = await apiClient.get<T[]>(
+      `${path}${separator}${query}`,
+      options
+    );
+    if (!data) throw new ApiError(200, `The ${path} endpoint returned no data.`);
+    items.push(...data);
+    if (data.length < pageSize) return items;
+    offset += pageSize;
+  }
+}

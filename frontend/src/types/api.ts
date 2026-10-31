@@ -14,11 +14,13 @@
 
 export interface StatusHistory {
   id: string;
-  changed_at: string; // ISO 8601
+  subscription_id: string;
+  changed_at: string | null;
   from_status: string | null;
   to_status: string;
-  changed_by: string | null; // user id or "system"
-  note: string | null;
+  changed_by: string | null;
+  reason: string | null;
+  metadata: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -33,23 +35,53 @@ export type SubscriptionStatus =
   | "paused"
   | "closed";
 
-export interface ApiSubscription {
-  id: string; // UUID
-  reference: string;
+export interface ApiSubscriptionSummary {
+  id: string;
+  subscription_number: string;
+  quotation_number: string | null;
   customer_id: string;
-  customer_name: string;
   plan_id: string;
-  plan_name: string;
   status: SubscriptionStatus;
-  /** Decimal string e.g. "159.30" */
-  amount: string;
-  currency: string;
-  billing_interval: string; // e.g. "monthly", "annual"
-  start_date: string; // ISO 8601 date
+  quantity: string;
+  start_date: string;
+  end_date: string | null;
+  trial_end_date: string | null;
   next_billing_date: string | null;
-  cancelled_date: string | null;
-  created_at: string;
-  updated_at: string;
+  confirmed_at: string | null;
+  paused_at: string | null;
+  closed_at: string | null;
+  pause_reason: string | null;
+  close_reason: string | null;
+  unit_price: string;
+  discount_amount: string;
+  tax_amount: string;
+  total_amount: string;
+  currency: string;
+  auto_renew: boolean;
+  notes: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ApiSubscriptionLine {
+  id: string;
+  subscription_id: string;
+  product_id: string | null;
+  variant_id: string | null;
+  sequence: number;
+  description: string;
+  quantity: string;
+  unit_price: string;
+  discount_percent: string;
+  discount_amount: string;
+  tax_id: string | null;
+  tax_amount: string;
+  subtotal: string;
+  line_total: string;
+}
+
+export interface ApiSubscription extends ApiSubscriptionSummary {
+  lines: ApiSubscriptionLine[];
 }
 
 // ---------------------------------------------------------------------------
@@ -65,23 +97,52 @@ export type InvoiceStatus =
   | "void"
   | "cancelled";
 
-export interface ApiInvoice {
-  id: string; // UUID
+export interface ApiInvoiceSummary {
+  id: string;
   invoice_number: string;
   customer_id: string;
-  customer_name: string;
   subscription_id: string | null;
   status: InvoiceStatus;
-  /** Decimal string e.g. "500.00" */
+  issue_date: string;
+  due_date: string;
+  billing_period_start: string | null;
+  billing_period_end: string | null;
+  subtotal: string;
+  discount_amount: string;
+  tax_amount: string;
   total_amount: string;
-  /** Decimal string e.g. "250.00" */
-  paid_amount: string;
+  amount_paid: string;
+  amount_due: string;
   currency: string;
-  issued_date: string | null; // ISO 8601 date
-  due_date: string | null;
-  paid_date: string | null;
-  created_at: string;
-  updated_at: string;
+  notes: string | null;
+  terms_and_conditions: string | null;
+  paid_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ApiInvoiceLine {
+  id: string;
+  invoice_id: string;
+  subscription_line_id: string | null;
+  product_id: string | null;
+  variant_id: string | null;
+  sequence: number;
+  description: string;
+  quantity: string;
+  unit_price: string;
+  discount_percent: string;
+  discount_amount: string;
+  tax_id: string | null;
+  tax_name: string | null;
+  tax_rate: string | null;
+  tax_amount: string;
+  subtotal: string;
+  line_total: string;
+}
+
+export interface ApiInvoice extends ApiInvoiceSummary {
+  lines: ApiInvoiceLine[];
 }
 
 // ---------------------------------------------------------------------------
@@ -104,32 +165,73 @@ export type ApiPaymentMethod =
   | "other";
 
 export interface ApiPayment {
-  id: string; // UUID
+  id: string;
   invoice_id: string;
-  invoice_number: string;
   customer_id: string;
-  customer_name: string;
   status: PaymentStatus;
   method: ApiPaymentMethod;
-  /** Decimal string e.g. "49.00" */
   amount: string;
+  refunded_amount: string;
   currency: string;
-  payment_date: string; // ISO 8601 date
-  payment_reference: string | null;
+  payment_date: string;
+  payment_reference: string;
   notes: string | null;
-  created_at: string;
-  updated_at: string;
+  refunded_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
 }
 
-/** Body for POST /payments */
 export interface CreatePaymentBody {
   invoice_id: string;
-  /** Decimal string e.g. "50.00" */
   amount: string;
   method: ApiPaymentMethod;
-  /** Backend status at creation time — typically "completed" */
-  status: PaymentStatus;
-  payment_date: string;
+  status: "pending" | "completed";
+  payment_date?: string;
   payment_reference?: string;
   notes?: string;
+}
+
+export interface PaymentResult {
+  payment: ApiPayment;
+  invoice: ApiInvoiceSummary;
+}
+
+export interface ApiPlan {
+  id: string;
+  name: string;
+  interval: "daily" | "weekly" | "monthly" | "yearly";
+  price: string | number;
+  min_quantity: number;
+  start_date: string | null;
+  end_date: string | null;
+  auto_close: boolean;
+  closable_early: boolean;
+  pausable: boolean;
+  renewable: boolean;
+  is_active: boolean;
+  created_at: string | null;
+}
+
+export interface ApiVariant {
+  id: string;
+  product_id: string;
+  name: string;
+  sku_suffix: string | null;
+  extra_price: string | number;
+  is_active: boolean;
+  base_product_price: string | number;
+  final_price: string | number;
+  created_at: string | null;
+}
+
+export interface ApiCustomer {
+  id: string;
+  name: string;
+  email: string;
+  phone: string | null;
+  address: string | null;
+  auth_user_id: string | null;
+  role: "admin" | "staff" | "customer" | string;
+  is_active: boolean;
+  created_at: string | null;
 }
