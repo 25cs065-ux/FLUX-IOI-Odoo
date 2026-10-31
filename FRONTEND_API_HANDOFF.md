@@ -48,7 +48,7 @@ Authorization: Bearer <session.access_token>
 **Customer isolation (enforced by the server):**
 - **How "own" is decided:** a customer's records are found through `customers.auth_user_id = <Supabase user id>`.
 - **Lists:** they only ever contain the customer's own records. Any `customer_id` filter they send is ignored.
-- **Other customers' records:** asking for one by id returns **`404`, not `403`**, so it never confirms the record exists.
+- **Other customers' records:** on billing endpoints, asking for one by id returns **`404`, not `403`**, so it never confirms the record exists. The customers endpoints (Section 6a) return `403` instead.
 - **Draft invoices:** hidden from customers in both lists and lookups.
 - **No linked customer record:** a logged-in user with no `customers` row gets empty lists.
 
@@ -327,24 +327,59 @@ Errors to handle:
 
 ---
 
-## 6a. Customers (Vaidehi's module) — 🔴 UNRESOLVED SECURITY ISSUE
+## 6a. Customers (Vaidehi's module) ✅ ⚠️
 
-> 🔴 **Unresolved:** on `develop`, `GET /customers/`, `GET /customers/{id}`, `POST /customers/` and `PATCH /customers/{id}` require **no authentication**. Anyone can list every customer's name, email and role, create customers or deactivate accounts. Only `POST /customers/staff` requires admin. Reported to the module owner; not fixed yet. Send the Bearer token anyway, because the contract will become authenticated.
+All customer endpoints require a Bearer token (since `853f58c`; earlier versions of this doc said otherwise). There is no `POST /customers/staff` any more. Checked against `develop` at `9679271`.
 
-**Customer name lookup.** Subscriptions, invoices and payments return only `customer_id`. Fetch the list once and map `id → name`.
+**Customer name lookup.** Subscriptions, invoices and payments return only `customer_id`. Staff and admin page through `GET /customers/` and map `id → name`, or fetch `GET /customers/{id}` for a single name.
 
-| Method & path | Auth (current) | Returns |
+| Method & path | Who may call | Returns |
 |---|---|---|
-| `GET /customers/` | 🔴 none | `Customer[]`. Query: `search` (partial name or email), `role` (`customer` / `staff` / `admin`), `is_active` (`true` / `false`). **No pagination:** returns every match |
-| `GET /customers/{id}` | 🔴 none | `Customer` (404 if missing) |
-| `POST /customers/` | 🔴 none | `201` `Customer` (`409` on duplicate email) |
-| `PATCH /customers/{id}` | 🔴 none | `Customer`. Body: `name`, `is_active` |
-| `POST /customers/staff` | admin | `201` `Customer` |
+| `GET /customers/?search&limit&offset` | any signed-in user | `Customer[]`, newest first. `limit` 1–100 (default **20**), `offset` ≥ 0, `search` (max 100 chars) matches part of the name or email. Staff and admin see every customer; a customer sees only their own row |
+| `GET /customers/{id}` | any signed-in user | `Customer`. `404` if missing. A customer asking for someone else's row gets **`403`** (unlike billing, which returns `404`) |
+| `POST /customers/` | any signed-in user | `201` `Customer`. Body: `name`, `email`, `is_active`. For a customer caller the server links the row to their account and forces role `customer`. `409` if that email or account already has a profile |
+| `PATCH /customers/{id}` | staff/admin, or the customer for their own row | `Customer`. Body: `name`, `is_active`. For customers only `name` is applied; `role` and `is_active` are ignored |
 
 - Use the trailing slash (`/customers/`). `/customers` answers with a 307 redirect, which can drop the `Authorization` header across origins.
-- **`Customer` fields:** `id`, `name`, `email`, `is_active`, `role`, `auth_user_id` (nullable), `created_at` (nullable).
-- **Validation:** `name` is 1–100 characters; `email` must match a basic email pattern and is stored lowercased; a duplicate email returns `409`.
-- ⚠️ The `customers` table definition isn't in the repository, so its live constraints are unverified.
+- **`Customer` fields:** `id`, `name`, `email`, `is_active`, `role`, `auth_user_id` (nullable), `created_at` (nullable). There is **no** `phone` or `company`.
+- **Validation:** `name` is 1–100 characters; `email` must match a basic email pattern and is stored lowercased.
+- ✅ **Database mismatch fixed in `9679271`:** the live `customers` table has no `updated_at`, `phone` or `company` column (checked 31 Oct). Earlier versions of the router wrote `updated_at`, so create and edit failed against the live database; `9679271` stops writing it. Run that version (or later) of `develop`.
+- 🔴 **Known bug (unresolved):** `POST /customers/` called by **staff or admin** returns `500`, because the code reads an `auth_user_id` field that `CustomerCreate` does not have. A customer creating their own profile is not affected. Staff "add customer" forms should use mocks until this is fixed.
+
+---
+
+## 6b. Dashboard metrics — no dedicated endpoint
+
+There is **no** dashboard, metrics, stats or reports endpoint. Calculate the numbers in the frontend from the list endpoints, paging with `?limit=200&offset=` (staff/admin token):
+
+| Metric | Source |
+|---|---|
+| Active subscriptions | `GET /subscriptions?status=active`, count rows |
+| MRR | sum `total_amount` of active subscriptions, normalised by the plan's `interval` from `GET /plans/` (daily ×30, weekly ×4.33, monthly ×1, yearly ÷12) |
+| ARR | MRR × 12 |
+| Outstanding | `GET /invoices`, sum `amount_due` where `status` is `sent`, `partial` or `overdue` |
+| Overdue | `GET /invoices?status=overdue`, count rows or sum `amount_due` |
+| Collected | `GET /payments?status=completed`, sum `amount − refunded_amount` (add `partially_refunded` rows the same way) |
+
+All amounts are decimal strings; use a decimal library for sums. On 31 Oct the live project had 82 active subscriptions (INR) and **no invoices or payments**, so invoice and payment metrics are zero until a staff billing run is done.
+
+---
+
+## 6c. Catalogue and other modules (Vaidehi's modules)
+
+Contracts are in `/docs`; access rules as registered on `develop`:
+
+| Endpoints | Who may call |
+|---|---|
+| `GET /plans/` (`?is_active`), `GET /plans/{id}`, `GET /variants/` (`?product_id&is_active`), `GET /variants/{id}`, `GET /quotation-templates/` (`?is_active`), `GET /quotation-templates/{id}` | **no token needed** |
+| `POST /plans/`, `PATCH /plans/{id}`, `POST /variants/`, `PATCH /variants/{id}`, `POST /quotation-templates/`, `PATCH /quotation-templates/{id}` | admin |
+| `GET /taxes/` (`?is_active`), `POST /taxes/`, `GET /taxes/{id}`, `PATCH /taxes/{id}` | admin |
+| `GET /discounts/` (`?is_active`), `POST /discounts/`, `GET /discounts/{id}`, `PATCH /discounts/{id}` | admin |
+| `POST /discounts/validate?code&amount&quantity` | **no token needed** |
+| `GET /change-requests/`, `POST /change-requests/`, `GET /change-requests/{id}` | any signed-in user (non-admins see only their own) |
+| `PATCH /change-requests/{id}` | admin |
+
+Catalogue list endpoints are not paginated.
 
 ---
 
@@ -357,11 +392,13 @@ Errors to handle:
 | subscriptions | ✅ Section 4 |
 | invoices | ✅ Section 5 (including billing run and overdue marking) |
 | payments | ✅ Section 6 |
-| plans, taxes, discounts, products (variants) | ✅ Merged into `develop` and registered (Vaidehi's modules: `/plans/`, `/taxes/`, `/discounts/`, `/variants/`). Their contracts aren't documented here; use `/docs`. `GET` on `/plans/` and `/variants/`, and `POST /discounts/validate`, currently require no token |
-| customers, staff | ✅ Exists, see Section 6a. 🔴 Unresolved: no authentication on the customer endpoints |
-| quotation-templates | ✅ Merged and registered (`/quotation-templates/`; `GET` requires no token). Contract: see `/docs` |
+| plans, taxes, discounts, products (variants) | ✅ Section 6c (contracts in `/docs`). There is no `/products` endpoint; products appear only through `variants` |
+| customers | ✅ Section 6a. Listing and editing work; 🔴 staff/admin "add customer" returns `500` until the `auth_user_id` bug is fixed |
+| staff | ⏳ No staff endpoint (`POST /customers/staff` was removed). Staff accounts are managed in Supabase |
+| quotation-templates | ✅ Section 6c |
 | dunning | ⏳ Not implemented (`POST /invoices/mark-overdue` ✅ is the only building block) |
-| command-center, health-radar, leak-detective, reports, simulator | ⏳ Not implemented. No dashboard or metrics endpoints exist; for now, build summaries from the list endpoints |
+| command-center | ⚠️ No metrics endpoint; compute from list endpoints (Section 6b) |
+| health-radar, leak-detective, reports, simulator | ⏳ Not implemented |
 
 **Customer portal:**
 
@@ -370,7 +407,7 @@ Errors to handle:
 | subscriptions | ✅ `GET /subscriptions`, `GET /subscriptions/{id}`, `GET /subscriptions/{id}/history`, accept a quote: `POST /subscriptions/{id}/confirm` |
 | invoices | ✅ `GET /invoices`, `GET /invoices/{id}` (no drafts). ⏳ PDF download not implemented |
 | payments | ✅ `GET /payments`, `GET /payments/{id}`. ⏳ **Customers cannot pay online.** There's no payment gateway or checkout endpoint; payments are recorded by staff |
-| profile | ⏳ No FastAPI endpoint. Use Supabase Auth for email/password changes; there's no customer-profile API |
+| profile | ✅ `GET /customers/` returns the customer's own row (name, email); `PATCH /customers/{id}` updates their `name`. No phone or company fields exist. Email/password changes go through Supabase Auth |
 | login, register, forgot/reset password, verify email | Supabase Auth (Section 1) |
 
 ---
@@ -385,9 +422,9 @@ Errors to handle:
 | `SUPABASE_SERVICE_ROLE_KEY` | **backend only, never in the frontend** | in `.env.example` |
 | `NEXTAUTH_URL`, `NEXTAUTH_SECRET` | NextAuth | in `.env.example`. ⚠️ May be obsolete given the Supabase Auth decision |
 | `NEXT_PUBLIC_API_URL` | browser-side API base URL | Already read by the frontend code (`feat/seena-frontend`); ⏳ not yet in `.env.example` |
-| `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` | browser-side Supabase Auth | ⏳ **not defined yet.** Next.js only exposes `NEXT_PUBLIC_*` variables to the browser; the team needs to add these names |
+| `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` | browser-side Supabase Auth (use the publishable key) | names agreed and used in local `frontend/.env.local`; ⏳ not yet in `.env.example`, and no frontend code reads them yet |
 | `ALLOWED_ORIGINS` | backend CORS (comma-separated) | optional; defaults listed in Section 3 |
-| Supabase JWT verification config (`SUPABASE_JWT_SECRET` or JWKS URL) | backend | ⏳ not defined, pending the shared auth decision |
+| `SUPABASE_JWT_SECRET` | backend | not needed: the project signs tokens with ES256 and the backend uses its published keys (JWKS). Only for legacy HS256 projects |
 
 Ask the team lead for the values; never commit them.
 
@@ -395,9 +432,12 @@ Ask the team lead for the values; never commit them.
 
 ## 9. Not verified against live Supabase ⚠️
 
-All of the contracts above are tested against an in-memory database stand-in and the schema file `database/remaining_schema.sql`, **not the live database**. Still unconfirmed:
+The billing contracts are tested against an in-memory database stand-in, the schema file `database/remaining_schema.sql`, and a local PostgreSQL copy of that schema.
+
+**Checked against the live project on 31 Oct (read-only):** every billing table has every column the API reads or writes, as do the columns billing reads from customers, plans, products, variants, taxes and quotation templates. The live `customers` table has **no** `updated_at`, `phone` or `company` column; the customers router stopped writing `updated_at` in `9679271` (see Section 6a).
+
+Still unconfirmed:
 - the exact number formatting in responses;
-- the column names in the plans, products, variants, taxes and customers tables;
 - the database's `SUB-`/`INV-` numbering;
 - that the database rejects duplicate billing periods (the `uix_invoice_live_period` index).
 
