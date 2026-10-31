@@ -2,8 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  AreaChart,
-  Area,
   BarChart,
   Bar,
   PieChart,
@@ -13,7 +11,6 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  Legend,
   ResponsiveContainer,
 } from "recharts";
 import {
@@ -59,9 +56,18 @@ const STATUS_COLOURS: Record<SubscriptionStatus, string> = {
 };
 
 interface ChartMonth {
-  month: string;
+  key: string; // "YYYY-MM"
   collected: bigint;
   overdue: bigint;
+  payments: number;
+}
+
+interface ChartPoint {
+  key: string;
+  month: string;
+  collected: number;
+  overdue: number;
+  payments: number;
 }
 
 interface PaymentActivity {
@@ -85,6 +91,7 @@ interface DashboardData {
   customerCount: number;
   subscriptionStatuses: { status: SubscriptionStatus; count: number }[];
   months: ChartMonth[];
+  latestPaymentDate: string | null;
   recentPayments: PaymentActivity[];
 }
 
@@ -98,6 +105,36 @@ interface ChartTooltipProps {
   active?: boolean;
   payload?: TooltipPayloadEntry[];
   label?: string;
+}
+
+// Axis labels such as "₹8.2L"; tooltips and totals use the exact amount.
+const compactInr = new Intl.NumberFormat("en-IN", {
+  style: "currency",
+  currency: "INR",
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
+function formatAxisAmount(minorUnits: number): string {
+  return compactInr.format(minorUnits / 100);
+}
+
+function CollectedTooltip({ active, payload }: { active?: boolean; payload?: { payload: ChartPoint }[] }) {
+  const point = payload?.[0]?.payload;
+  if (!active || !point) return null;
+  return (
+    <div className="rounded-lg border border-border bg-card px-3 py-2 text-sm shadow-lg">
+      <p className="mb-1 font-semibold text-foreground">{toMonthLabel(point.key)}</p>
+      {point.payments ? (
+        <p className="tabular-nums">
+          <span className="font-medium">{formatMinorUnits(BigInt(point.collected), "INR")}</span>
+          <span className="text-muted-foreground"> · {point.payments} payment{point.payments === 1 ? "" : "s"}</span>
+        </p>
+      ) : (
+        <p className="text-muted-foreground">No completed payments</p>
+      )}
+    </div>
+  );
 }
 
 function RevenueTooltip({ active, payload, label }: ChartTooltipProps) {
@@ -116,11 +153,31 @@ function RevenueTooltip({ active, payload, label }: ChartTooltipProps) {
   );
 }
 
-function toMonthLabel(monthKey: string): string {
-  const [year, month] = monthKey.split("-").map(Number);
-  return new Date(year, month - 1, 1).toLocaleDateString("en-IN", {
-    month: "short",
-    year: "numeric",
+function toMonthLabel(monthKey: string, year: "numeric" | "2-digit" = "numeric"): string {
+  const [y, month] = monthKey.split("-").map(Number);
+  return new Date(y, month - 1, 1).toLocaleDateString("en-IN", { month: "short", year });
+}
+
+/** The last `count` calendar months ending with the current month, oldest first ("YYYY-MM"). */
+function lastMonthKeys(count: number, today = new Date()): string[] {
+  return Array.from({ length: count }, (_, i) => {
+    const date = new Date(today.getFullYear(), today.getMonth() - (count - 1 - i), 1);
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+  });
+}
+
+/** One point per calendar month in the window; months without records are zero. */
+function buildMonthWindow(months: ChartMonth[], count: number): ChartPoint[] {
+  const byKey = new Map(months.map((month) => [month.key, month]));
+  return lastMonthKeys(count).map((key) => {
+    const month = byKey.get(key);
+    return {
+      key,
+      month: toMonthLabel(key, "2-digit"),
+      collected: Number(month?.collected ?? 0n),
+      overdue: Number(month?.overdue ?? 0n),
+      payments: month?.payments ?? 0,
+    };
   });
 }
 
@@ -173,18 +230,19 @@ function calculateDashboard(
     statusCounts.set(subscription.status, (statusCounts.get(subscription.status) ?? 0) + 1);
   }
 
-  const months = new Map<string, { collected: bigint; overdue: bigint }>();
-  for (const payment of payments) {
-    const key = payment.payment_date.slice(0, 7);
-    const entry = months.get(key) ?? { collected: 0n, overdue: 0n };
-    entry.collected += decimalToMinorUnits(payment.amount) - decimalToMinorUnits(payment.refunded_amount);
+  const months = new Map<string, ChartMonth>();
+  const monthEntry = (key: string) => {
+    const entry = months.get(key) ?? { key, collected: 0n, overdue: 0n, payments: 0 };
     months.set(key, entry);
+    return entry;
+  };
+  for (const payment of payments) {
+    const entry = monthEntry(payment.payment_date.slice(0, 7));
+    entry.collected += decimalToMinorUnits(payment.amount) - decimalToMinorUnits(payment.refunded_amount);
+    entry.payments += 1;
   }
   for (const invoice of overdueInvoices) {
-    const key = invoice.due_date.slice(0, 7);
-    const entry = months.get(key) ?? { collected: 0n, overdue: 0n };
-    entry.overdue += decimalToMinorUnits(invoice.amount_due);
-    months.set(key, entry);
+    monthEntry(invoice.due_date.slice(0, 7)).overdue += decimalToMinorUnits(invoice.amount_due);
   }
 
   const customersById = new Map(customers.map((customer) => [customer.id, customer]));
@@ -199,13 +257,10 @@ function calculateDashboard(
       currency: payment.currency,
       date: payment.payment_date,
     }));
-  const monthlyData = [...months.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([month, values]) => ({
-      month: toMonthLabel(month),
-      collected: values.collected,
-      overdue: values.overdue,
-    }));
+  const latestPaymentDate = payments.reduce<string | null>(
+    (latest, payment) => (!latest || payment.payment_date > latest ? payment.payment_date : latest),
+    null
+  );
 
   return {
     activeCount: activeSubscriptions.length,
@@ -218,7 +273,8 @@ function calculateDashboard(
     collected,
     customerCount: customers.filter((customer) => customer.role === "customer").length,
     subscriptionStatuses: [...statusCounts].map(([status, count]) => ({ status, count })),
-    months: monthlyData,
+    months: [...months.values()],
+    latestPaymentDate,
     recentPayments,
   };
 }
@@ -269,13 +325,11 @@ export default function CommandCenterPage() {
     void Promise.resolve().then(() => fetchDashboard());
   }, [fetchDashboard]);
 
-  const chartData = useMemo(() => data?.months.slice(-period) ?? [], [data, period]);
+  const chartValues = useMemo(() => buildMonthWindow(data?.months ?? [], period), [data, period]);
   const statusTotal = data?.subscriptionStatuses.reduce((total, item) => total + item.count, 0) ?? 0;
-  const chartValues = chartData.map((item) => ({
-    month: item.month,
-    collected: Number(item.collected),
-    overdue: Number(item.overdue),
-  }));
+  const windowPayments = chartValues.reduce((total, item) => total + item.payments, 0);
+  const windowCollected = chartValues.reduce((total, item) => total + BigInt(item.collected), 0n);
+  const monthsWithPayments = chartValues.filter((item) => item.payments > 0).length;
   const overdueChartValues = chartValues.filter((item) => item.overdue > 0);
 
   return (
@@ -322,24 +376,36 @@ export default function CommandCenterPage() {
             ))}
           </div>
         </div>
-        {chartValues.length ? (
-          <ResponsiveContainer width="100%" height={280}>
-            <AreaChart data={chartValues} margin={{ top: 4, right: 8, left: 8, bottom: 0 }}>
-              <defs>
-                <linearGradient id="gradCollected" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.2} />
-                  <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="oklch(0.922 0 0)" vertical={false} />
-              <XAxis dataKey="month" tick={{ fontSize: 11, fill: "oklch(0.556 0 0)" }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize: 11, fill: "oklch(0.556 0 0)" }} axisLine={false} tickLine={false} tickFormatter={(value: number) => formatMinorUnits(BigInt(Math.round(value)), "INR")} width={82} />
-              <Tooltip content={<RevenueTooltip />} />
-              <Legend wrapperStyle={{ fontSize: 11 }} iconType="circle" iconSize={8} />
-              <Area type="monotone" dataKey="collected" name="Collected" stroke="#3b82f6" strokeWidth={2} fill="url(#gradCollected)" dot={false} activeDot={{ r: 4 }} />
-            </AreaChart>
-          </ResponsiveContainer>
-        ) : <p className="py-16 text-center text-sm text-muted-foreground">{loading ? "Loading…" : "No payment history is available."}</p>}
+        {loading && !data ? (
+          <p className="py-16 text-center text-sm text-muted-foreground">Loading…</p>
+        ) : windowPayments ? (
+          <>
+            <p className="mb-3 text-sm text-foreground">
+              <span className="font-semibold tabular-nums">{formatMinorUnits(windowCollected)}</span>
+              <span className="text-muted-foreground">
+                {` from ${windowPayments} payment${windowPayments === 1 ? "" : "s"} · payments recorded in ${monthsWithPayments} of ${period} months`}
+              </span>
+            </p>
+            <ResponsiveContainer width="100%" height={280}>
+              <BarChart data={chartValues} margin={{ top: 4, right: 8, left: 8, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="oklch(0.922 0 0)" vertical={false} />
+                <XAxis dataKey="month" interval={0} tick={{ fontSize: 11, fill: "oklch(0.556 0 0)" }} axisLine={false} tickLine={false} />
+                <YAxis domain={[0, "auto"]} allowDecimals={false} tick={{ fontSize: 11, fill: "oklch(0.556 0 0)" }} axisLine={false} tickLine={false} tickFormatter={formatAxisAmount} width={64} />
+                <Tooltip content={<CollectedTooltip />} cursor={{ fill: "oklch(0.97 0 0)" }} />
+                <Bar dataKey="collected" name="Collected" fill="#3b82f6" radius={[4, 4, 0, 0]} maxBarSize={48} />
+              </BarChart>
+            </ResponsiveContainer>
+          </>
+        ) : (
+          <div className="py-12 text-center">
+            <p className="text-sm font-medium text-foreground">No completed payments in the last {period} months</p>
+            <p className="mx-auto mt-1 max-w-md text-xs text-muted-foreground">
+              {data?.latestPaymentDate
+                ? `The most recent completed payment is dated ${formatDate(data.latestPaymentDate)}. Choose a longer period to include it.`
+                : "Collected amounts appear here once customers pay their invoices. Record a payment on the Payments page to start the trend."}
+            </p>
+          </div>
+        )}
       </section>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
