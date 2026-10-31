@@ -31,7 +31,7 @@ Authorization: Bearer <session.access_token>
 ```
 
 **Not decided or not verified yet:**
-- **Where the role comes from.** The app role (`admin` / `staff` / `customer`) is read from the token's `app_metadata.role` (only the server can set it), otherwise from the `customers.role` column for the signed-in user, otherwise `customer`. `user_metadata`, the token's own `role` claim (always `"authenticated"`) and `X-User-Role` headers are ignored. The frontend should not decide roles itself.
+- **Where the role comes from.** The team's shared auth dependency (`backend/app/core/auth.py`) reads the app role (`admin` / `staff` / `customer`) from the signed-in user's `customers.role` row, otherwise from `app_metadata.role` (only the server can set it), otherwise `customer`. A `customers` row with `is_active = false` gets `403`. `user_metadata`, the token's own `role` claim (always `"authenticated"`) and `X-User-Role` headers are ignored. The frontend should not decide roles itself.
 - ⚠️ **Supabase project settings:** email confirmation on/off, allowed redirect URLs, SMTP, and minimum password length. The test plan requires passwords **longer than 8 characters**, so validate that on the form too.
 - ⚠️ **Packages and env vars:** `frontend/package.json` has `next-auth` but no `@supabase/supabase-js`, and `.env.example` still has `NEXTAUTH_*` variables. These predate the Supabase Auth decision. Confirm with the team before building on NextAuth.
 

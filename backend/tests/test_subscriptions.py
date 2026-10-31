@@ -5,7 +5,7 @@ from decimal import Decimal
 import pytest
 from fastapi.testclient import TestClient
 
-from app.core.current_user import CurrentUser, Role, get_current_user
+from app.core.current_user import AuthBackend, CurrentUser, Role, get_auth_backend, get_current_user
 from app.main import app
 from app.repositories.subscription_repository import get_subscription_repository
 from app.services.subscription_service import price_line
@@ -75,8 +75,9 @@ def test_requests_without_token_get_401(repo):
     assert res.status_code == 401
 
 
-def test_auth_placeholder_fails_closed_with_token(repo):
+def test_unconfigured_auth_fails_closed_with_token(repo):
     app.dependency_overrides[get_subscription_repository] = lambda: repo
+    app.dependency_overrides[get_auth_backend] = lambda: AuthBackend(None)     # no SUPABASE_URL
     try:
         res = TestClient(app).get("/subscriptions", headers={"Authorization": "Bearer anything"})
     finally:

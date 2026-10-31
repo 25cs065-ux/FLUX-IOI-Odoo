@@ -5,7 +5,7 @@ from decimal import Decimal
 import pytest
 from fastapi.testclient import TestClient
 
-from app.core.current_user import CurrentUser, Role, get_current_user
+from app.core.current_user import AuthBackend, CurrentUser, Role, get_auth_backend, get_current_user
 from app.main import app
 from app.repositories.invoice_repository import get_invoice_repository
 from app.repositories.payment_repository import get_payment_repository
@@ -356,6 +356,7 @@ def test_staff_can_record_payments(client, repo):
 
 def test_payments_require_authentication(repo):
     app.dependency_overrides[get_payment_repository] = lambda: repo
+    app.dependency_overrides[get_auth_backend] = lambda: AuthBackend(None)     # no SUPABASE_URL
     try:
         anon = TestClient(app)
         assert anon.get("/payments").status_code == 401
