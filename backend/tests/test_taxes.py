@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import patch, MagicMock
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
 from fastapi import FastAPI
@@ -11,8 +12,8 @@ test_app.include_router(taxes_router)
 client = TestClient(test_app)
 
 def test_valid_tax_creation():
-    tax = TaxCreate(name="GST 18%", rate=18.0)
-    assert tax.name == "GST 18%"
+    tax = TaxCreate(name="Standard VAT", rate=18.0)
+    assert tax.name == "Standard VAT"
     assert tax.rate == 18.0
 
 def test_tax_rate_zero_valid():
@@ -25,40 +26,44 @@ def test_tax_rate_100_valid():
 
 def test_tax_rate_negative_fails():
     with pytest.raises(ValidationError):
-        TaxCreate(name="Negative Tax", rate=-5.0)
+        TaxCreate(name="Negative Tax", rate=-1.0)
 
 def test_tax_rate_over_100_fails():
     with pytest.raises(ValidationError):
-        TaxCreate(name="Over Max Tax", rate=105.0)
+        TaxCreate(name="Over 100 Tax", rate=100.1)
 
 def test_admin_role_enforcement_blocks_missing_token():
-    # Unauthenticated request must return 401 Unauthorized
-    response = client.get("/taxes/")
-    assert response.status_code == 401
+    payload = {"name": "Test Tax", "rate": 5.0}
+    res = client.post("/taxes/", json=payload)
+    assert res.status_code == 401
 
 def test_admin_role_enforcement_blocks_customer():
-    # Authenticated customer user must receive 403 Forbidden
-    test_app.dependency_overrides[get_current_user] = lambda: {
-        "id": "cust-001",
-        "email": "customer@example.com",
-        "role": "customer"
-    }
+    test_app.dependency_overrides[get_current_user] = lambda: {"id": "c1", "email": "cust@test.com", "role": "customer"}
     try:
-        response = client.get("/taxes/")
-        assert response.status_code == 403
+        payload = {"name": "Test Tax", "rate": 5.0}
+        res = client.post("/taxes/", json=payload)
+        assert res.status_code == 403
     finally:
         test_app.dependency_overrides.clear()
 
-def test_admin_role_enforcement_permits_admin():
-    # Authenticated admin user passes RBAC check
-    test_app.dependency_overrides[get_current_user] = lambda: {
-        "id": "admin-001",
-        "email": "admin@example.com",
-        "role": "admin"
-    }
+@patch("app.routers.taxes.supabase")
+def test_admin_role_enforcement_permits_admin(mock_supabase):
+    test_app.dependency_overrides[get_current_user] = lambda: {"id": "a1", "email": "admin@test.com", "role": "admin"}
+    
+    mock_table = MagicMock()
+    mock_table.insert.return_value.execute.return_value.data = [{
+        "id": "00000000-0000-0000-0000-000000000000",
+        "name": "Admin Tax",
+        "rate": 12.0,
+        "is_active": True,
+        "created_at": "2026-10-31T00:00:00Z"
+    }]
+    mock_supabase.table.return_value = mock_table
+
     try:
-        response = client.get("/taxes/")
-        # Status code 200 confirms require_admin dependency allowed the request through
-        assert response.status_code in (200, 404)
+        payload = {"name": "Admin Tax", "rate": 12.0}
+        res = client.post("/taxes/", json=payload)
+        assert res.status_code in (200, 201)
+        assert res.json()["name"] == "Admin Tax"
     finally:
         test_app.dependency_overrides.clear()
