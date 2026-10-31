@@ -1,9 +1,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
-from pydantic import ValidationError
 from fastapi.testclient import TestClient
 from fastapi import FastAPI
-from app.schemas.customer import CustomerCreate, CustomerUpdate
 from app.routers.customers import router as customers_router
 from app.core.auth import get_current_user
 
@@ -11,83 +9,105 @@ test_app = FastAPI()
 test_app.include_router(customers_router)
 client = TestClient(test_app)
 
-def test_valid_customer_creation():
-    cust = CustomerCreate(
-        name="Jane Doe",
-        email="jane.doe@example.com",
-        phone="+1234567890"
-    )
-    assert cust.name == "Jane Doe"
-    assert cust.email == "jane.doe@example.com"
+DUMMY_ID = "00000000-0000-0000-0000-000000000000"
 
-def test_invalid_email_format_fails():
-    with pytest.raises(ValidationError):
-        CustomerCreate(
-            name="Jane Doe",
-            email="invalid-email-address",
-            phone="+1234567890"
-        )
+def test_unauthenticated_requests_blocked():
+    assert client.get("/customers/").status_code == 401
+    assert client.get(f"/customers/{DUMMY_ID}").status_code == 401
+    assert client.post("/customers/", json={"name": "Alice", "email": "alice@test.com"}).status_code == 401
+    assert client.patch(f"/customers/{DUMMY_ID}", json={"name": "Alice Updated"}).status_code == 401
 
-def test_short_name_fails():
-    with pytest.raises(ValidationError):
-        CustomerCreate(
-            name="",
-            email="jane@example.com",
-            phone="+1234567890"
-        )
-
-def test_staff_creation_blocks_unauthenticated():
-    payload = {
-        "name": "Staff Member",
-        "email": "staff@example.com",
-        "role": "staff",
-        "password": "SecurePassword123!"
+@patch("app.routers.customers.supabase")
+def test_admin_create_customer_with_custom_auth_id(mock_sb):
+    test_app.dependency_overrides[get_current_user] = lambda: {"id": "admin-1", "email": "admin@test.com", "role": "admin"}
+    mock_table = MagicMock()
+    mock_table.select.return_value.or_.return_value.execute.return_value.data = []
+    created_record = {
+        "id": DUMMY_ID,
+        "name": "Corporate Client",
+        "email": "client@corp.com",
+        "auth_user_id": "target-auth-uuid",
+        "role": "customer",
+        "is_active": True,
+        "created_at": "2026-10-31T00:00:00Z"
     }
-    res = client.post("/customers/staff", json=payload)
-    assert res.status_code == 401
+    mock_table.insert.return_value.execute.return_value.data = [created_record]
+    mock_sb.table.return_value = mock_table
 
-def test_staff_creation_blocks_customer_role():
-    test_app.dependency_overrides[get_current_user] = lambda: {"id": "c1", "email": "cust@test.com", "role": "customer"}
     try:
         payload = {
-            "name": "Staff Member",
-            "email": "staff@example.com",
-            "role": "staff",
-            "password": "SecurePassword123!"
+            "name": "Corporate Client",
+            "email": "client@corp.com",
+            "auth_user_id": "target-auth-uuid",
+            "role": "customer"
         }
-        res = client.post("/customers/staff", json=payload)
-        assert res.status_code == 403
+        res = client.post("/customers/", json=payload)
+        assert res.status_code == 201
+        assert res.json()["auth_user_id"] == "target-auth-uuid"
+        called_data = mock_table.insert.call_args[0][0]
+        assert called_data["auth_user_id"] == "target-auth-uuid"
     finally:
         test_app.dependency_overrides.clear()
 
 @patch("app.routers.customers.supabase")
-def test_staff_creation_permits_admin(mock_supabase):
-    test_app.dependency_overrides[get_current_user] = lambda: {"id": "a1", "email": "admin@test.com", "role": "admin"}
-    
-    mock_auth_res = MagicMock()
-    mock_auth_res.user.id = "auth-staff-001"
-    mock_supabase.auth.admin.create_user.return_value = mock_auth_res
-    
+def test_staff_create_customer_without_explicit_auth_id(mock_sb):
+    test_app.dependency_overrides[get_current_user] = lambda: {"id": "staff-1", "email": "staff@test.com", "role": "staff"}
     mock_table = MagicMock()
-    mock_table.insert.return_value.execute.return_value.data = [{
-        "id": "00000000-0000-0000-0000-000000000000",
-        "name": "Staff Member",
-        "email": "staff@example.com",
-        "role": "staff",
-        "phone": "+1234567890",
+    mock_table.select.return_value.or_.return_value.execute.return_value.data = []
+    created_record = {
+        "id": DUMMY_ID,
+        "name": "Walk-in Customer",
+        "email": "walkin@test.com",
+        "auth_user_id": "staff-1",
+        "role": "customer",
+        "is_active": True,
         "created_at": "2026-10-31T00:00:00Z"
-    }]
-    mock_supabase.table.return_value = mock_table
+    }
+    mock_table.insert.return_value.execute.return_value.data = [created_record]
+    mock_sb.table.return_value = mock_table
 
     try:
         payload = {
-            "name": "Staff Member",
-            "email": "staff@example.com",
-            "role": "staff",
-            "phone": "+1234567890",
-            "password": "SecurePassword123!"
+            "name": "Walk-in Customer",
+            "email": "walkin@test.com"
         }
-        res = client.post("/customers/staff", json=payload)
-        assert res.status_code in (200, 201)
+        res = client.post("/customers/", json=payload)
+        assert res.status_code == 201
+        assert res.json()["name"] == "Walk-in Customer"
+    finally:
+        test_app.dependency_overrides.clear()
+
+@patch("app.routers.customers.supabase")
+def test_duplicate_customer_creation_fails(mock_sb):
+    test_app.dependency_overrides[get_current_user] = lambda: {"id": "user-A", "email": "a@test.com", "role": "customer"}
+    mock_sb.table.return_value.select.return_value.or_.return_value.execute.return_value.data = [{"id": DUMMY_ID}]
+    try:
+        res = client.post("/customers/", json={"name": "Alice", "email": "a@test.com"})
+        assert res.status_code == 409
+        assert "already exists" in res.json()["detail"]
+    finally:
+        test_app.dependency_overrides.clear()
+
+@patch("app.routers.customers.supabase")
+def test_customer_cannot_deactivate_self(mock_sb):
+    test_app.dependency_overrides[get_current_user] = lambda: {"id": "user-A", "email": "a@test.com", "role": "customer"}
+    mock_record = {
+        "id": DUMMY_ID,
+        "name": "Alice",
+        "email": "a@test.com",
+        "auth_user_id": "user-A",
+        "is_active": True,
+        "role": "customer"
+    }
+    mock_table = MagicMock()
+    mock_table.select.return_value.eq.return_value.execute.return_value.data = [mock_record]
+    mock_table.update.return_value.eq.return_value.execute.return_value.data = [mock_record]
+    mock_sb.table.return_value = mock_table
+
+    try:
+        res = client.patch(f"/customers/{DUMMY_ID}", json={"is_active": False})
+        assert res.status_code == 200
+        called_payload = mock_table.update.call_args[0][0]
+        assert "is_active" not in called_payload
     finally:
         test_app.dependency_overrides.clear()

@@ -10,3 +10,4 @@ google-generativeai
 pytest
 httpx
 faker
+email-validator>=2.0.0
