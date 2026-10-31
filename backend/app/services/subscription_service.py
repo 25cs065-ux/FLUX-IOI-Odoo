@@ -11,7 +11,10 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
+from contextlib import contextmanager
+
 from app.core.current_user import CurrentUser, Role
+from app.repositories.billing_rpc import RuleViolation
 from app.repositories.subscription_repository import SubscriptionRepository
 from app.schemas.subscription import (
     RenewRequest,
@@ -46,6 +49,21 @@ class ConflictError(SubscriptionError):
 
 class ValidationError(SubscriptionError):
     status_code = 422
+
+
+def transactional(repo) -> bool:
+    """True when the repository runs multi-table writes as database functions."""
+    return bool(getattr(repo, "transactional", False))
+
+
+@contextmanager
+def db_rules():
+    """Map business rules enforced inside database functions to API errors."""
+    try:
+        yield
+    except RuleViolation as exc:
+        error = {404: NotFoundError, 409: ConflictError, 422: ValidationError}.get(exc.status_code, ConflictError)
+        raise error(exc.message) from exc
 
 
 EDITABLE_STATUSES = {S.DRAFT.value, S.QUOTATION.value}
@@ -246,7 +264,7 @@ def create_subscription(repo: SubscriptionRepository, payload: SubscriptionCreat
     _validate_optional_refs(repo, payload.payment_terms_id, payload.quotation_template_id)
 
     lines = build_lines(repo, payload.lines or [_plan_line(plan, payload.quantity)])
-    sub = repo.insert_subscription({
+    header = {
         "customer_id": payload.customer_id,
         "plan_id": payload.plan_id,
         "quotation_template_id": payload.quotation_template_id,
@@ -263,13 +281,18 @@ def create_subscription(repo: SubscriptionRepository, payload: SubscriptionCreat
         "notes": payload.notes,
         "created_by": user.id,
         **compute_totals(lines),
-    })
+    }
+    history = {"from_status": None, "to_status": S.DRAFT.value, "changed_by": user.id,
+               "metadata": {"action": "create"}}
+    if transactional(repo):
+        with db_rules():
+            saved = repo.create_subscription_tx(header, lines, history)
+        return {**saved["subscription"], "lines": saved["lines"]}
+
+    sub = repo.insert_subscription(header)
     try:
         saved_lines = repo.insert_lines([{**l, "subscription_id": sub["id"]} for l in lines])
-        repo.insert_history({
-            "subscription_id": sub["id"], "from_status": None, "to_status": S.DRAFT.value,
-            "changed_by": user.id, "metadata": {"action": "create"},
-        })
+        repo.insert_history({**history, "subscription_id": sub["id"]})
     except Exception:
         # Supabase has no multi-statement transactions over REST; undo the header.
         repo.delete_subscription(sub["id"])
@@ -320,6 +343,14 @@ def update_subscription(repo: SubscriptionRepository, subscription_id: UUID,
     if {"start_date", "trial_end_date"} & set(changes):
         changes["next_billing_date"] = _first_billing_date(start, trial)
     changes["updated_at"] = _now()
+
+    if transactional(repo):
+        with db_rules():
+            saved = repo.update_subscription_tx(subscription_id, sub["status"], sub.get("updated_at"),
+                                                changes, new_lines)
+        if not saved:
+            raise ConflictError("Subscription was changed by someone else; reload and try again")
+        return {**saved["subscription"], "lines": saved["lines"]}
 
     old_line_ids = [l["id"] for l in repo.list_lines(subscription_id)] if new_lines is not None else []
     updated = save_with_lines(

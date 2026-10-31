@@ -29,9 +29,11 @@ from app.services.subscription_service import (
     _now,
     _require_active,
     build_lines,
+    db_rules,
     own_customer_id,
     price_line,
     save_with_lines,
+    transactional,
 )
 from app.services.tax_engine import money
 
@@ -159,6 +161,13 @@ class PeriodAlreadyInvoiced(ConflictError):
 
 
 def _save(repo: InvoiceRepository, header: dict, lines: list[dict]) -> dict:
+    if transactional(repo):
+        try:
+            with db_rules():
+                saved = repo.create_invoice_tx(header, lines)
+        except DuplicateInvoiceError as exc:
+            raise PeriodAlreadyInvoiced() from exc
+        return {**saved["invoice"], "lines": saved["lines"]}
     try:
         inv = repo.insert_invoice(header)
     except DuplicateInvoiceError as exc:
@@ -229,8 +238,7 @@ def bill_subscription(repo: InvoiceRepository, sub: dict, user: CurrentUser, iss
         raise ConflictError("Subscription has no lines to invoice")
 
     lines = lines_from_subscription(repo, rows)
-    try:
-        inv = _save(repo, {
+    header = {
         "customer_id": sub["customer_id"],
         "subscription_id": sub["id"],
         "payment_terms_id": sub.get("payment_terms_id"),
@@ -239,10 +247,23 @@ def bill_subscription(repo: InvoiceRepository, sub: dict, user: CurrentUser, iss
         "due_date": due_date_for(repo, issue_date, sub.get("payment_terms_id")),
         "billing_period_start": period_start,
         "billing_period_end": period_end,
-            "currency": sub.get("currency") or "INR",
-            "created_by": user.id,
-            **invoice_totals(lines),
-        }, lines)
+        "currency": sub.get("currency") or "INR",
+        "created_by": user.id,
+        **invoice_totals(lines),
+    }
+    if transactional(repo):
+        # Invoice, lines and next_billing_date are written in one transaction.
+        try:
+            with db_rules():
+                saved = repo.create_invoice_tx(header, lines, sub["id"], period_start,
+                                               _next_billing_date(period_end, end))
+        except DuplicateInvoiceError as exc:
+            _advance_billing_date(repo, sub, period_end, end)
+            raise PeriodAlreadyInvoiced() from exc
+        return {**saved["invoice"], "lines": saved["lines"]}
+
+    try:
+        inv = _save(repo, header, lines)
     except PeriodAlreadyInvoiced:
         # Lost a race with a concurrent run (uix_invoice_live_period).
         _advance_billing_date(repo, sub, period_end, end)
@@ -257,11 +278,15 @@ def bill_subscription(repo: InvoiceRepository, sub: dict, user: CurrentUser, iss
 def _advance_billing_date(repo: InvoiceRepository, sub: dict, period_end: date, end: Optional[date]) -> None:
     """Move next_billing_date past period_end. Idempotent: every caller
     for the same period writes the same value."""
-    next_start = period_end + timedelta(days=1)
     repo.update_subscription(sub["id"], {
-        "next_billing_date": None if end and next_start > end else next_start,
+        "next_billing_date": _next_billing_date(period_end, end),
         "updated_at": _now(),
     }, expected_status="active")
+
+
+def _next_billing_date(period_end: date, end: Optional[date]) -> Optional[date]:
+    next_start = period_end + timedelta(days=1)
+    return None if end and next_start > end else next_start
 
 
 def generate_invoice(repo, subscription_id: UUID, user, issue_date: Optional[date] = None) -> dict:
@@ -336,6 +361,13 @@ def update_invoice(repo: InvoiceRepository, invoice_id: UUID, payload: InvoiceUp
         changes.update(invoice_totals(new_lines))
     changes["updated_at"] = _now()
 
+    if transactional(repo):
+        with db_rules():
+            saved = repo.update_invoice_tx(invoice_id, inv["status"], inv.get("updated_at"), changes, new_lines)
+        if not saved:
+            raise ConflictError("Invoice was changed by someone else; reload and try again")
+        return {**saved["invoice"], "lines": saved["lines"]}
+
     updated = save_with_lines(
         old_line_ids=[l["id"] for l in repo.list_invoice_lines(invoice_id)] if new_lines is not None else [],
         insert_lines=(lambda: repo.insert_invoice_lines([{**l, "invoice_id": invoice_id} for l in new_lines]))
@@ -390,6 +422,9 @@ def send_invoice(repo, invoice_id, user) -> dict:
 
 def cancel_invoice(repo, invoice_id, user) -> dict:
     inv = get_invoice(repo, invoice_id, user)
+    if transactional(repo):
+        with db_rules():
+            return repo.cancel_invoice_tx(invoice_id)
     updated = _set_status(repo, inv, I.CANCELLED, {I.DRAFT})
     _release_billing_period(repo, inv)
     return updated
@@ -406,8 +441,12 @@ def _live_payments(repo: InvoiceRepository, invoice_id) -> list[dict]:
 def void_invoice(repo, invoice_id, user) -> dict:
     """Payment recording re-reads the invoice status after inserting, and void
     re-reads the payments after writing; whichever runs second backs out, so a
-    payment can never end up on a void invoice."""
+    payment can never end up on a void invoice. With database functions the
+    invoice row lock makes the two operations strictly sequential instead."""
     inv = get_invoice(repo, invoice_id, user)
+    if transactional(repo):
+        with db_rules():
+            return repo.void_invoice_tx(invoice_id)
     if inv["status"] in (I.SENT.value, I.OVERDUE.value) and (
             _dec(inv.get("amount_paid") or 0) > 0 or _live_payments(repo, inv["id"])):
         raise ConflictError("Invoice has payments recorded or pending; refund or fail them before voiding")

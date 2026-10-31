@@ -36,7 +36,9 @@ from app.services.subscription_service import (
     _date,
     _dec,
     _now,
+    db_rules,
     own_customer_id,
+    transactional,
 )
 
 PAYABLE_INVOICE_STATUSES = {I.SENT.value, I.PARTIAL.value, I.OVERDUE.value}
@@ -68,6 +70,9 @@ def derive_invoice_status(total: Decimal, paid: Decimal, due_date: date, today: 
 def sync_invoice_balance(repo: PaymentRepository, invoice_id, today: Optional[date] = None) -> dict:
     """Re-derive amount_paid / status / paid_at from the invoice's payments."""
     today = today or date.today()
+    if transactional(repo):
+        with db_rules():
+            return repo.recalculate_invoice_tx(invoice_id, today)
     for _ in range(SYNC_ATTEMPTS):
         inv = repo.get_invoice(invoice_id)
         if not inv:
@@ -182,22 +187,38 @@ def record_payment(repo: PaymentRepository, payload: PaymentCreate, user: Curren
     if payload.amount > outstanding:
         raise ConflictError(f"Payment exceeds the outstanding balance of {outstanding}")
 
+    data = {
+        "payment_reference": payload.payment_reference or f"PAY-{uuid.uuid4().hex[:12].upper()}",
+        "invoice_id": inv["id"],
+        "customer_id": inv["customer_id"],
+        "method": payload.method.value,
+        "status": payload.status,
+        "amount": payload.amount,
+        "currency": inv["currency"],
+        "payment_date": payload.payment_date or today,
+        "gateway": payload.gateway,
+        "gateway_payment_id": payload.gateway_payment_id,
+        "gateway_response": payload.gateway_response,
+        "notes": payload.notes,
+        "recorded_by": user.id,
+    }
+    if transactional(repo):
+        # One transaction holding the invoice row lock: the checks above are
+        # repeated in the database, so concurrent payments/voids serialise.
+        try:
+            with db_rules():
+                saved = repo.record_payment_tx(data, today)
+        except DuplicatePaymentError:
+            existing = repo.get_payment_by_reference(data["payment_reference"])
+            if not existing:
+                raise
+            return _replay(repo, existing, payload, "payment_reference"), False
+        if saved["replay"]:
+            return _replay(repo, saved["payment"], payload, "payment_reference"), False
+        return {"payment": saved["payment"], "invoice": saved["invoice"]}, True
+
     try:
-        payment = repo.insert_payment({
-            "payment_reference": payload.payment_reference or f"PAY-{uuid.uuid4().hex[:12].upper()}",
-            "invoice_id": inv["id"],
-            "customer_id": inv["customer_id"],
-            "method": payload.method.value,
-            "status": payload.status,
-            "amount": payload.amount,
-            "currency": inv["currency"],
-            "payment_date": payload.payment_date or today,
-            "gateway": payload.gateway,
-            "gateway_payment_id": payload.gateway_payment_id,
-            "gateway_response": payload.gateway_response,
-            "notes": payload.notes,
-            "recorded_by": user.id,
-        })
+        payment = repo.insert_payment(data)
     except DuplicatePaymentError:
         # Lost a race with an identical request.
         existing = repo.get_payment_by_reference(payload.payment_reference)
@@ -230,6 +251,9 @@ def confirm_payment(repo, payment_id, user, today=None) -> dict:
     payment = get_payment(repo, payment_id, user)
     if payment["status"] != P.PENDING.value:
         raise ConflictError(f"Only pending payments can be confirmed (status is {payment['status']})")
+    if transactional(repo):
+        with db_rules():
+            return repo.change_payment_tx(payment_id, "confirm", today or date.today())
     updated = repo.update_payment(payment_id, {"status": P.COMPLETED.value, "updated_at": _now()},
                                   expected_status=P.PENDING.value)
     if not updated:
@@ -249,6 +273,9 @@ def fail_payment(repo, payment_id, user, today=None) -> dict:
     payment = get_payment(repo, payment_id, user)
     if payment["status"] != P.PENDING.value:
         raise ConflictError(f"Only pending payments can be marked failed (status is {payment['status']})")
+    if transactional(repo):
+        with db_rules():
+            return repo.change_payment_tx(payment_id, "fail", today or date.today())
     updated = repo.update_payment(payment_id, {"status": P.FAILED.value, "updated_at": _now()},
                                   expected_status=P.PENDING.value)
     if not updated:
@@ -271,6 +298,9 @@ def refund_payment(repo: PaymentRepository, payment_id: UUID, payload: RefundReq
 
     total_refunded = already + refund
     note = f"Refund of {refund}" + (f": {payload.reason}" if payload.reason else "")
+    if transactional(repo):
+        with db_rules():
+            return repo.change_payment_tx(payment_id, "refund", today or date.today(), amount=refund, note=note)
     updated = repo.update_payment(payment_id, {
         "refunded_amount": total_refunded,
         "status": P.REFUNDED.value if total_refunded == amount else P.PARTIALLY_REFUNDED.value,

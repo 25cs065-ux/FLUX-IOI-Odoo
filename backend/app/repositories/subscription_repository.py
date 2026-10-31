@@ -5,6 +5,8 @@ from decimal import Decimal
 from typing import Optional, Protocol
 from uuid import UUID
 
+from app.repositories.billing_rpc import BillingRpcMixin, call_supabase
+
 
 def to_row(data: dict) -> dict:
     """Convert Python values into JSON-safe values for PostgREST."""
@@ -50,10 +52,16 @@ class SubscriptionRepository(Protocol):
     def insert_history(self, entry: dict) -> dict: ...
     def list_history(self, subscription_id: UUID) -> list[dict]: ...
 
+    # Repositories with `transactional = True` also provide the *_tx methods of
+    # billing_rpc.BillingRpcMixin; services use them instead of multi-step writes.
 
-class SupabaseSubscriptionRepository:
+
+class SupabaseSubscriptionRepository(BillingRpcMixin):
     def __init__(self, client):
         self.db = client
+
+    def _call_rpc(self, name, params):
+        return call_supabase(self.db, name, params)
 
     def _one(self, table: str, column: str, value) -> Optional[dict]:
         res = self.db.table(table).select("*").eq(column, str(value)).limit(1).execute()
