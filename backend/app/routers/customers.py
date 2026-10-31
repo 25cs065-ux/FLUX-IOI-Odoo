@@ -1,84 +1,89 @@
-from fastapi import APIRouter, HTTPException, Depends, status, Query
+from fastapi import APIRouter, HTTPException, Depends, status
 from typing import List, Optional
-from app.schemas.customer import CustomerCreate, CustomerUpdate, CustomerResponse, StaffCreate, UserRole
-from app.core.supabase import supabase
-from app.core.auth import require_admin
+from datetime import datetime, timezone
 
-router = APIRouter(
-    prefix="/customers",
-    tags=["customers"]
+from app.schemas.customer import (
+    CustomerCreate,
+    CustomerUpdate,
+    CustomerResponse
 )
+from app.core.supabase import supabase
+from app.core.auth import get_current_user, require_admin
 
-@router.get("/", response_model=List[CustomerResponse])
-def list_customers(
-    search: Optional[str] = Query(None, description="Search by name or email"),
-    role: Optional[UserRole] = Query(None),
-    is_active: Optional[bool] = Query(None)
-):
-    query = supabase.table("customers").select("*")
-    if role:
-        query = query.eq("role", role.value)
-    if is_active is not None:
-        query = query.eq("is_active", is_active)
-    if search:
-        query = query.or_(f"name.ilike.%{search}%,email.ilike.%{search}%")
-        
-    res = query.execute()
-    data = res.data or []
-    return [CustomerResponse(**item) for item in data]
+router = APIRouter(prefix="/customers", tags=["Customers"])
 
 @router.post("/", response_model=CustomerResponse, status_code=status.HTTP_201_CREATED)
-def create_customer(payload: CustomerCreate):
-    existing = supabase.table("customers").select("id").eq("email", payload.email).execute()
-    if existing.data and len(existing.data) > 0:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Customer with email '{payload.email}' already exists"
-        )
-    
-    insert_data = payload.model_dump(mode="json")
-    insert_data["role"] = UserRole.CUSTOMER.value
-    
-    res = supabase.table("customers").insert(insert_data).execute()
+def create_customer(
+    payload: CustomerCreate,
+    current_user: dict = Depends(get_current_user)
+):
+    # Only admin/staff or the authenticated user creating their own linked profile
+    data = payload.model_dump(mode="json")
+    if current_user.get("role") not in ("admin", "staff"):
+        data["auth_user_id"] = current_user["id"]
+        data["role"] = "customer"
+
+    data["created_at"] = datetime.now(timezone.utc).isoformat()
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    res = supabase.table("customers").insert(data).execute()
     if not res.data:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to create customer")
     return CustomerResponse(**res.data[0])
 
+@router.get("/", response_model=List[CustomerResponse])
+def list_customers(current_user: dict = Depends(get_current_user)):
+    # Non-admin/staff users only see their own customer profile
+    query = supabase.table("customers").select("*")
+    if current_user.get("role") not in ("admin", "staff"):
+        query = query.eq("auth_user_id", current_user["id"])
+
+    res = query.order("created_at", desc=True).execute()
+    return [CustomerResponse(**item) for item in (res.data or [])]
+
 @router.get("/{customer_id}", response_model=CustomerResponse)
-def get_customer(customer_id: str):
+def get_customer(
+    customer_id: str,
+    current_user: dict = Depends(get_current_user)
+):
     res = supabase.table("customers").select("*").eq("id", customer_id).execute()
-    if not res.data or len(res.data) == 0:
+    if not res.data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
-    return CustomerResponse(**res.data[0])
+
+    record = res.data[0]
+    # Enforce owner/admin access
+    if current_user.get("role") not in ("admin", "staff") and record.get("auth_user_id") != current_user["id"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    return CustomerResponse(**record)
 
 @router.patch("/{customer_id}", response_model=CustomerResponse)
-def update_customer(customer_id: str, payload: CustomerUpdate):
+def update_customer(
+    customer_id: str,
+    payload: CustomerUpdate,
+    current_user: dict = Depends(get_current_user)
+):
+    existing = supabase.table("customers").select("*").eq("id", customer_id).execute()
+    if not existing.data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
+
+    record = existing.data[0]
+    # Enforce owner/admin access
+    if current_user.get("role") not in ("admin", "staff") and record.get("auth_user_id") != current_user["id"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
     update_data = payload.model_dump(exclude_unset=True, mode="json")
     if not update_data:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields provided to update")
 
+    # Prevent customers from elevating their own role
+    if current_user.get("role") not in ("admin", "staff") and "role" in update_data:
+        del update_data["role"]
+
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+
     res = supabase.table("customers").update(update_data).eq("id", customer_id).execute()
-    if not res.data or len(res.data) == 0:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found or update failed")
-    return CustomerResponse(**res.data[0])
-
-@router.post("/staff", response_model=CustomerResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
-def create_staff(payload: StaffCreate):
-    existing = supabase.table("customers").select("id").eq("email", payload.email).execute()
-    if existing.data and len(existing.data) > 0:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"User with email '{payload.email}' already exists"
-        )
-
-    insert_data = {
-        "name": payload.name,
-        "email": payload.email,
-        "role": payload.role.value,
-        "is_active": True
-    }
-    
-    res = supabase.table("customers").insert(insert_data).execute()
     if not res.data:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to create staff member")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to update customer")
+
     return CustomerResponse(**res.data[0])
