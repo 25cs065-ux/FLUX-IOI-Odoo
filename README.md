@@ -23,3 +23,6 @@ Aadya (Tech Lead), Seena (Frontend), Vaidehi (Features and QA), Khushi (Integrat
 - Never commit .env files or API keys
 - Work only on feature/<name>-<module> branches and open PRs into develop
 - Only edit files in your own folders (see docs/task-board.md)
+## Versions
+Python 3.12 (3.11 also fine), Node 20+. Run backend with: uvicorn app.main:app --reload
+
