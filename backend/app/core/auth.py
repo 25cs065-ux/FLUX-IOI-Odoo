@@ -1,0 +1,64 @@
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from app.core.supabase import supabase
+from typing import Dict, Any
+
+security = HTTPBearer()
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> Dict[str, Any]:
+    token = credentials.credentials
+    try:
+        user_res = supabase.auth.get_user(token)
+        if not user_res or not user_res.user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired token"
+            )
+        user = user_res.user
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Authentication failed: {str(e)}"
+        )
+
+    role = "customer"
+    user_id = user.id
+    email = user.email
+
+    try:
+        cust_res = supabase.table("customers").select("*").eq("auth_user_id", user.id).execute()
+        if cust_res.data and len(cust_res.data) > 0:
+            cust_record = cust_res.data[0]
+            role = cust_record.get("role", "customer")
+        else:
+            metadata = getattr(user, "user_metadata", {}) or {}
+            app_metadata = getattr(user, "app_metadata", {}) or {}
+            meta_role = app_metadata.get("role") or metadata.get("role")
+            
+            if meta_role in ("admin", "staff"):
+                role = meta_role
+            else:
+                is_confirmed = bool(getattr(user, "email_confirmed_at", None) or getattr(user, "confirmed_at", None))
+                if is_confirmed and email:
+                    match_res = supabase.table("customers").select("*").eq("email", email).is_("auth_user_id", "null").execute()
+                    if match_res.data and len(match_res.data) > 0:
+                        matched = match_res.data[0]
+                        role = matched.get("role", "customer")
+                        supabase.table("customers").update({"auth_user_id": user.id}).eq("id", matched["id"]).execute()
+    except Exception:
+        metadata = getattr(user, "user_metadata", {}) or {}
+        role = metadata.get("role", "customer")
+
+    return {
+        "id": user_id,
+        "email": email,
+        "role": role,
+    }
+
+async def require_admin(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    if current_user.get("role") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required"
+        )
+    return current_user
