@@ -42,11 +42,11 @@ const upcomingRenewals = mySubscriptions.filter(
 );
 
 const outstandingCents = myInvoices
-  .filter((i) => i.status === "pending" || i.status === "overdue")
+  .filter((i) => i.status === "sent" || i.status === "partial" || i.status === "overdue")
   .reduce((acc, i) => acc + (i.totalCents - i.paidCents), 0);
 
 const totalPaidCents = myPayments
-  .filter((p) => p.status === "paid")
+  .filter((p) => p.status === "completed")
   .reduce((acc, p) => acc + p.amountCents, 0);
 
 // Recent activity: last 3 invoices and last 3 payments

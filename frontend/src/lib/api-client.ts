@@ -4,20 +4,21 @@
 // A thin fetch wrapper that centralises base URL resolution, JSON
 // serialisation, authentication headers and error normalisation.
 //
-// Base URL is read from the NEXT_PUBLIC_API_URL environment variable so it
-// can be configured per-environment without code changes. No endpoint paths
-// are hardcoded here — callers supply them.
+// Base URL is read from NEXT_PUBLIC_BACKEND_URL (browser-accessible).
+// No endpoint paths are hardcoded here — callers supply them.
 //
 // Usage:
-//   import { apiClient } from "@/lib/api-client";
+//   import { apiClient, buildQuery } from "@/lib/api-client";
 //
-//   // GET
-//   const { data } = await apiClient.get<Subscription[]>("/subscriptions");
+//   // GET with query params
+//   const { data } = await apiClient.get<Subscription[]>(
+//     "/subscriptions" + buildQuery({ status: "active", limit: 20 }),
+//     { token }
+//   );
 //
-//   // POST with auth token
-//   const { data } = await apiClient.post<Invoice>("/invoices", body, {
-//     token: "Bearer eyJ...",
-//   });
+//   // POST with auth token — pass the raw Supabase access_token string;
+//   // the "Bearer " prefix is added automatically.
+//   const { data } = await apiClient.post<Invoice>("/invoices", body, { token });
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -40,8 +41,8 @@ export class ApiError extends Error {
 
 export interface RequestOptions {
   /**
-   * Bearer token to attach as `Authorization: Bearer <token>`.
-   * Pass the raw token string — the "Bearer " prefix is added automatically.
+   * Raw Supabase access token (without "Bearer " prefix).
+   * The prefix is added automatically in buildHeaders.
    */
   token?: string;
   /** Additional headers merged with the defaults. */
@@ -51,16 +52,40 @@ export interface RequestOptions {
 }
 
 // ---------------------------------------------------------------------------
+// Query-parameter builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a URL query string from a plain object, omitting null/undefined values.
+ *
+ * buildQuery({ status: "active", limit: 20, offset: undefined })
+ *   → "?status=active&limit=20"
+ *
+ * Returns "" (empty string) when the object has no defined values.
+ */
+export function buildQuery(
+  params: Record<string, string | number | boolean | null | undefined>
+): string {
+  const entries = Object.entries(params).filter(
+    ([, v]) => v !== null && v !== undefined && v !== ""
+  );
+  if (entries.length === 0) return "";
+  const qs = entries
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+    .join("&");
+  return `?${qs}`;
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
 function getBaseUrl(): string {
-  const url = process.env.NEXT_PUBLIC_API_URL;
+  const url = process.env.NEXT_PUBLIC_BACKEND_URL;
   if (!url) {
-    // Warn clearly during development; fail gracefully in production.
     if (process.env.NODE_ENV !== "production") {
       console.warn(
-        "[api-client] NEXT_PUBLIC_API_URL is not set. " +
+        "[api-client] NEXT_PUBLIC_BACKEND_URL is not set. " +
           "API requests will be made to a relative path."
       );
     }
@@ -76,8 +101,12 @@ function buildHeaders(options?: RequestOptions): HeadersInit {
     Accept: "application/json",
   };
 
+  // Accept a raw token string — never double-prefix.
   if (options?.token) {
-    headers["Authorization"] = `Bearer ${options.token}`;
+    const raw = options.token.startsWith("Bearer ")
+      ? options.token
+      : `Bearer ${options.token}`;
+    headers["Authorization"] = raw;
   }
 
   if (options?.headers) {
@@ -113,7 +142,27 @@ async function parseBody<T>(response: Response): Promise<T | null> {
 }
 
 /**
+ * Normalise the FastAPI `detail` field, which can be either:
+ *   - a string   e.g. "Subscription is already active"
+ *   - an array   e.g. [{ type, loc, msg }]  (Pydantic validation errors)
+ */
+function parseDetail(
+  detail: string | Array<{ msg?: string; message?: string }> | undefined
+): string | undefined {
+  if (!detail) return undefined;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail.map((d) => d.msg ?? d.message ?? "Validation error").join("; ");
+  }
+  return undefined;
+}
+
+/**
  * Execute a fetch request and normalise errors into `ApiError`.
+ *
+ * Special status codes:
+ *   409 — conflict (e.g. duplicate, invalid state transition)
+ *   503 — auth service unavailable (Supabase not configured on server)
  */
 async function request<T>(
   method: string,
@@ -140,16 +189,28 @@ async function request<T>(
   }
 
   if (!response.ok) {
+    // Special-case human-readable messages for well-known codes.
+    if (response.status === 503) {
+      throw new ApiError(503, "Authentication service is unavailable. Check server configuration.");
+    }
+
     // Attempt to read a server-supplied error message from the body.
     let serverMessage: string | undefined;
     try {
-      const errorBody = await parseBody<{ message?: string; detail?: string }>(
-        response
-      );
+      const errorBody = await parseBody<{
+        message?: string;
+        detail?: string | Array<{ msg?: string; message?: string }>;
+      }>(response);
       serverMessage =
-        errorBody?.message ?? errorBody?.detail ?? undefined;
+        errorBody?.message ??
+        parseDetail(errorBody?.detail) ??
+        undefined;
     } catch {
       // Ignore parse failures on error responses.
+    }
+
+    if (response.status === 409) {
+      throw new ApiError(409, serverMessage ?? "Conflict — the action cannot be completed in the current state.");
     }
 
     throw new ApiError(

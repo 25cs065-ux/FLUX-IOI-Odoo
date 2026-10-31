@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import {
   FileText,
   CheckCircle2,
@@ -11,6 +11,8 @@ import {
   Send,
   Printer,
   X,
+  RefreshCw,
+  WifiOff,
 } from "lucide-react";
 import { Dialog } from "@base-ui/react/dialog";
 import { cn } from "cn";
@@ -24,7 +26,33 @@ import {
 } from "@/components/shared";
 import { Button } from "@/components/ui/button";
 import { MOCK_INVOICES, type MockInvoice } from "@/mocks/invoices";
-import { formatCents, formatDate } from "@/lib/format";
+import { formatCents, formatDate, formatDecimalInr } from "@/lib/format";
+import { apiClient, buildQuery } from "@/lib/api-client";
+import { getSupabaseToken } from "@/lib/supabase-token";
+import type { ApiInvoice } from "@/types/api";
+
+// ---------------------------------------------------------------------------
+// Adapter — map backend response to the shape the UI expects
+// ---------------------------------------------------------------------------
+
+function adaptInvoice(api: ApiInvoice): MockInvoice {
+  const totalCents = Math.round(parseFloat(api.total_amount) * 100);
+  const paidCents = Math.round(parseFloat(api.paid_amount) * 100);
+  return {
+    id: api.id,
+    invoiceNumber: api.invoice_number,
+    customerId: api.customer_id,
+    customerName: api.customer_name,
+    subscriptionId: api.subscription_id ?? null,
+    status: api.status as MockInvoice["status"],
+    totalCents,
+    paidCents,
+    currency: api.currency,
+    issuedDate: api.issued_date ?? "",
+    dueDate: api.due_date ?? "",
+    paidDate: api.paid_date ?? null,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Types & constants
@@ -35,13 +63,16 @@ type InvStatus = MockInvoice["status"];
 const STATUS_FILTER_OPTIONS: { label: string; value: InvStatus | "all" }[] = [
   { label: "All", value: "all" },
   { label: "Draft", value: "draft" },
-  { label: "Pending", value: "pending" },
+  { label: "Sent", value: "sent" },
+  { label: "Partial", value: "partial" },
   { label: "Paid", value: "paid" },
   { label: "Overdue", value: "overdue" },
+  { label: "Void", value: "void" },
   { label: "Cancelled", value: "cancelled" },
 ];
 
-type ActionKind = "confirm" | "cancel" | "send" | "print";
+// Backend-aligned actions. "confirm" is replaced by "send" (draft → sent).
+type ActionKind = "send" | "cancel" | "void" | "print";
 
 interface PendingAction {
   kind: ActionKind;
@@ -56,31 +87,35 @@ const ACTION_CONFIG: Record<
     confirmLabel: string;
     destructive: boolean;
     needsConfirm: boolean;
+    endpoint?: string;
   }
 > = {
-  confirm: {
-    title: "Confirm invoice",
+  send: {
+    title: "Send invoice",
     description: (n) =>
-      `Mark ${n} as confirmed and send it to the customer for payment.`,
-    confirmLabel: "Confirm",
+      `Send ${n} to the customer — moves status from draft to sent.`,
+    confirmLabel: "Send invoice",
     destructive: false,
     needsConfirm: true,
+    endpoint: "send",
   },
   cancel: {
     title: "Cancel invoice",
     description: (n) =>
-      `Cancel ${n}. This cannot be undone and the customer will be notified.`,
+      `Cancel ${n}. This cannot be undone.`,
     confirmLabel: "Cancel invoice",
     destructive: true,
     needsConfirm: true,
+    endpoint: "cancel",
   },
-  send: {
-    title: "Send invoice",
+  void: {
+    title: "Void invoice",
     description: (n) =>
-      `Re-send ${n} to the customer's email address on file.`,
-    confirmLabel: "Send",
-    destructive: false,
+      `Void ${n}. Only allowed when the invoice has been sent or is overdue with no payments recorded.`,
+    confirmLabel: "Void invoice",
+    destructive: true,
     needsConfirm: true,
+    endpoint: "void",
   },
   print: {
     title: "Print / download",
@@ -170,24 +205,54 @@ function buildColumns(
 
 export default function InvoicesPage() {
   const [invoices, setInvoices] = useState<MockInvoice[]>(MOCK_INVOICES);
+  const [loading, setLoading] = useState(true);
+  const [usingMock, setUsingMock] = useState(false);
+
   const [statusFilter, setStatusFilter] = useState<InvStatus | "all">("all");
   const [selectedInvoice, setSelectedInvoice] = useState<MockInvoice | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  // ── Fetch from API ───────────────────────────────────────────────────────
+  const fetchInvoices = useCallback(async () => {
+    setLoading(true);
+    try {
+      const token = getSupabaseToken();
+      const qs = buildQuery({ status: statusFilter === "all" ? undefined : statusFilter, limit: 100 });
+      const { data } = await apiClient.get<ApiInvoice[]>(
+        `/invoices${qs}`,
+        token ? { token } : undefined
+      );
+      if (data && Array.isArray(data)) {
+        setInvoices(data.map(adaptInvoice));
+        setUsingMock(false);
+      }
+    } catch {
+      setInvoices(MOCK_INVOICES);
+      setUsingMock(true);
+    } finally {
+      setLoading(false);
+    }
+  }, [statusFilter]);
+
+  useEffect(() => { fetchInvoices(); }, [fetchInvoices]);
 
   // ── Filtered list ─────────────────────────────────────────────────────────
   const filteredInvoices = useMemo(
     () =>
-      statusFilter === "all"
+      statusFilter === "all" || !usingMock
         ? invoices
         : invoices.filter((i) => i.status === statusFilter),
-    [invoices, statusFilter]
+    [invoices, statusFilter, usingMock]
   );
 
   // ── Summary stats ─────────────────────────────────────────────────────────
   const stats = useMemo(() => {
     const total = invoices.reduce((acc, i) => acc + i.totalCents, 0);
+    // "sent" is the backend equivalent of old "pending"
     const outstanding = invoices
-      .filter((i) => i.status === "pending" || i.status === "draft")
+      .filter((i) => i.status === "sent" || i.status === "partial" || i.status === "draft")
       .reduce((acc, i) => acc + (i.totalCents - i.paidCents), 0);
     const overdue = invoices
       .filter((i) => i.status === "overdue")
@@ -196,11 +261,44 @@ export default function InvoicesPage() {
     return { total, outstanding, overdue, paidCount };
   }, [invoices]);
 
-  // ── Mutations (local mock state) ──────────────────────────────────────────
-  function applyAction(kind: ActionKind, id: string) {
+  // ── Mutations ────────────────────────────────────────────────────────────
+  async function applyAction(kind: ActionKind, id: string) {
+    if (kind === "print") {
+      alert("PDF download is not available yet.");
+      setPendingAction(null);
+      return;
+    }
+
+    setActionLoading(true);
+    setActionError(null);
+
+    const cfg = ACTION_CONFIG[kind];
+    if (!usingMock && cfg.endpoint) {
+      try {
+        const token = getSupabaseToken();
+        await apiClient.post(
+          `/invoices/${id}/${cfg.endpoint}`,
+          {},
+          token ? { token } : undefined
+        );
+        await fetchInvoices();
+        setPendingAction(null);
+        setSelectedInvoice(null);
+        setActionLoading(false);
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Action failed";
+        setActionError(msg);
+        setActionLoading(false);
+        return;
+      }
+    }
+
+    // Mock fallback
     const nextStatus: Partial<Record<ActionKind, InvStatus>> = {
-      confirm: "pending",
+      send: "sent",
       cancel: "cancelled",
+      void: "void",
     };
     if (nextStatus[kind]) {
       setInvoices((prev) =>
@@ -212,8 +310,8 @@ export default function InvoicesPage() {
         prev?.id === id ? { ...prev, status: nextStatus[kind]! } : prev
       );
     }
-    // "send" and "print" are UI-only in demo mode
     setPendingAction(null);
+    setActionLoading(false);
   }
 
   const columns = useMemo(() => buildColumns(setSelectedInvoice), []);
@@ -229,28 +327,48 @@ export default function InvoicesPage() {
             Track and manage customer invoices
           </p>
         </div>
-        <span className="rounded-md bg-muted px-2 py-1 text-xs font-medium text-muted-foreground">
-          Demo data — actions are local only
-        </span>
+        <div className="flex items-center gap-2">
+          {usingMock && (
+            <span className="flex items-center gap-1.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 px-2 py-1 text-xs font-medium text-amber-700 dark:text-amber-300">
+              <WifiOff className="size-3" />
+              Demo data
+            </span>
+          )}
+          <Button variant="outline" size="sm" onClick={fetchInvoices} disabled={loading}>
+            <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
+            Refresh
+          </Button>
+        </div>
       </div>
+
+      {/* Action error banner */}
+      {actionError && (
+        <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          <AlertCircle className="size-4 shrink-0" />
+          {actionError}
+          <button className="ml-auto text-xs underline" onClick={() => setActionError(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatCard
           title="Total invoiced"
-          value={formatCents(stats.total, "USD")}
+          value={formatDecimalInr(String(stats.total / 100))}
           icon={FileText}
           description={`${invoices.length} invoices`}
         />
         <StatCard
           title="Outstanding"
-          value={formatCents(stats.outstanding, "USD")}
+          value={formatDecimalInr(String(stats.outstanding / 100))}
           icon={Clock}
           trend={{ direction: "neutral", label: "awaiting payment" }}
         />
         <StatCard
           title="Overdue"
-          value={formatCents(stats.overdue, "USD")}
+          value={formatDecimalInr(String(stats.overdue / 100))}
           icon={AlertCircle}
           trend={
             stats.overdue > 0
@@ -275,7 +393,7 @@ export default function InvoicesPage() {
           pageSize={8}
           searchPlaceholder="Search by invoice #, customer…"
           searchKeys={["invoiceNumber", "customerName", "status"]}
-          emptyMessage="No invoices match the current filter."
+          emptyMessage={loading ? "Loading…" : "No invoices match the current filter."}
           filterControls={
             <div className="flex flex-wrap gap-1">
               {STATUS_FILTER_OPTIONS.map((opt) => (
@@ -308,12 +426,12 @@ export default function InvoicesPage() {
       {pendingAction && (
         <ConfirmDialog
           open
-          onOpenChange={(open) => { if (!open) setPendingAction(null); }}
+          onOpenChange={(open) => { if (!open) { setPendingAction(null); setActionError(null); } }}
           title={ACTION_CONFIG[pendingAction.kind].title}
           description={ACTION_CONFIG[pendingAction.kind].description(
             pendingAction.invoice.invoiceNumber
           )}
-          confirmLabel={ACTION_CONFIG[pendingAction.kind].confirmLabel}
+          confirmLabel={actionLoading ? "Working…" : ACTION_CONFIG[pendingAction.kind].confirmLabel}
           destructive={ACTION_CONFIG[pendingAction.kind].destructive}
           onConfirm={() =>
             applyAction(pendingAction.kind, pendingAction.invoice.id)
@@ -337,21 +455,21 @@ interface InvoiceDrawerProps {
 function InvoiceDrawer({ invoice, onClose, onAction }: InvoiceDrawerProps) {
   if (!invoice) return null;
 
-  // Actions available per status
+  // Actions available per backend status
   const availableActions: ActionKind[] = (() => {
     switch (invoice.status) {
-      case "draft": return ["confirm", "cancel"];
-      case "pending": return ["send", "cancel"];
-      case "overdue": return ["send", "cancel"];
+      case "draft": return ["send", "cancel"];
+      case "sent":
+      case "overdue": return ["void"];
       case "paid": return ["print"];
       default: return [];
     }
   })();
 
   const actionIcons: Partial<Record<ActionKind, React.ReactNode>> = {
-    confirm: <CheckCircle2 className="size-3.5" />,
-    cancel: <X className="size-3.5" />,
     send: <Send className="size-3.5" />,
+    cancel: <X className="size-3.5" />,
+    void: <X className="size-3.5" />,
     print: <Printer className="size-3.5" />,
   };
 
@@ -459,10 +577,9 @@ function InvoiceDrawer({ invoice, onClose, onAction }: InvoiceDrawerProps) {
               )}
             </dl>
 
-            {/* Icon reference */}
             <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
               <DollarSign className="size-3.5 shrink-0" />
-              Actions in demo mode do not persist to the backend.
+              PDF download is not yet implemented on the backend.
             </div>
           </div>
 
@@ -472,7 +589,7 @@ function InvoiceDrawer({ invoice, onClose, onAction }: InvoiceDrawerProps) {
               {availableActions.map((kind) => (
                 <Button
                   key={kind}
-                  variant={kind === "cancel" ? "destructive" : "outline"}
+                  variant={kind === "cancel" || kind === "void" ? "destructive" : "outline"}
                   size="sm"
                   onClick={() => onAction(kind, invoice)}
                 >

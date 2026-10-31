@@ -7,11 +7,16 @@
 
 import type { StatusValue } from "@/components/shared/StatusBadge";
 
+/**
+ * Payment method enum matching the backend exactly.
+ * Maps to ApiPaymentMethod in src/types/api.ts.
+ */
 export type PaymentMethod =
-  | "card"
   | "bank_transfer"
-  | "paypal"
-  | "crypto"
+  | "credit_card"
+  | "upi"
+  | "cash"
+  | "cheque"
   | "other";
 
 export interface MockPayment {
@@ -43,11 +48,11 @@ export const MOCK_PAYMENTS: MockPayment[] = [
     invoiceNumber: "INV-2026-0001",
     customerId: "cus_001",
     customerName: "Acme Corp",
-    status: "paid",
-    method: "card",
+    status: "completed",
+    method: "credit_card",
     date: "2026-10-10",
     amountCents: 4900,
-    currency: "USD",
+    currency: "INR",
     maskedAccount: "•••• 4242",
     gatewayReference: "ch_3QA1XxLkdIwHu7ix0FhK1234",
   },
@@ -58,13 +63,13 @@ export const MOCK_PAYMENTS: MockPayment[] = [
     invoiceNumber: "INV-2026-0002",
     customerId: "cus_002",
     customerName: "Globex Solutions",
-    status: "paid",
-    method: "card",
+    status: "completed",
+    method: "upi",
     date: "2026-10-14",
     amountCents: 1900,
-    currency: "USD",
-    maskedAccount: "•••• 5678",
-    gatewayReference: "ch_3QB2YyMleLxIv8jy1GiL5678",
+    currency: "INR",
+    maskedAccount: "user@okaxis",
+    gatewayReference: "upi_3QB2YyMleLxIv8jy1GiL5678",
   },
   {
     id: "pay_003",
@@ -73,11 +78,11 @@ export const MOCK_PAYMENTS: MockPayment[] = [
     invoiceNumber: "INV-2026-0005",
     customerId: "cus_006",
     customerName: "Wayne Enterprises",
-    status: "paid",
+    status: "completed",
     method: "bank_transfer",
     date: "2026-05-12",
     amountCents: 29900,
-    currency: "USD",
+    currency: "INR",
     maskedAccount: "•••• 9101",
     gatewayReference: "bt_20260512_wayne_29900",
   },
@@ -89,10 +94,10 @@ export const MOCK_PAYMENTS: MockPayment[] = [
     customerId: "cus_007",
     customerName: "Oscorp Technologies",
     status: "failed",
-    method: "card",
+    method: "credit_card",
     date: "2026-10-11",
     amountCents: 4900,
-    currency: "USD",
+    currency: "INR",
     maskedAccount: "•••• 0000",
     gatewayReference: "ch_3QC3ZzNmfMyJw9kz2HjM9012",
   },
@@ -107,7 +112,7 @@ export const MOCK_PAYMENTS: MockPayment[] = [
     method: "bank_transfer",
     date: "2026-10-25",
     amountCents: 29900,
-    currency: "USD",
+    currency: "INR",
     maskedAccount: "•••• 3344",
     gatewayReference: null,
   },
@@ -119,10 +124,10 @@ export const MOCK_PAYMENTS: MockPayment[] = [
     customerId: "cus_008",
     customerName: "Hooli Inc",
     status: "pending",
-    method: "card",
+    method: "credit_card",
     date: "2026-10-28",
     amountCents: 1900,
-    currency: "USD",
+    currency: "INR",
     maskedAccount: "•••• 1122",
     gatewayReference: null,
   },

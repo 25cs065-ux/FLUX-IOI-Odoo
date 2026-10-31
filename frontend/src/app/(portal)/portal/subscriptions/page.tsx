@@ -1,14 +1,12 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import {
   CalendarDays,
-  CreditCard,
   Eye,
-  PauseCircle,
-  RefreshCw,
-  XCircle,
+  CheckCircle2,
   X,
+  WifiOff,
 } from "lucide-react";
 import { Dialog } from "@base-ui/react/dialog";
 import { cn } from "cn";
@@ -18,90 +16,101 @@ import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { DEMO_CUSTOMER } from "@/mocks/demo-customer";
 import { MOCK_SUBSCRIPTIONS, type MockSubscription } from "@/mocks/subscriptions";
 import { formatInrCentsFull, formatDate, formatLabel } from "@/lib/format";
+import { apiClient } from "@/lib/api-client";
+import { getSupabaseToken } from "@/lib/supabase-token";
+import type { ApiSubscription } from "@/types/api";
 
 // ---------------------------------------------------------------------------
-// Customer actions — these are requests, not direct admin actions
+// Adapter
 // ---------------------------------------------------------------------------
 
-type RequestKind = "change_plan" | "pause" | "cancel";
-
-interface PendingRequest {
-  kind: RequestKind;
-  sub: MockSubscription;
+function adaptSubscription(api: ApiSubscription): MockSubscription {
+  const amountCents = Math.round(parseFloat(api.amount) * 100);
+  return {
+    id: api.id,
+    reference: api.reference,
+    customerId: api.customer_id,
+    customerName: api.customer_name,
+    planId: api.plan_id,
+    planName: api.plan_name,
+    status: api.status as MockSubscription["status"],
+    amountCents,
+    currency: api.currency,
+    billingInterval: api.billing_interval as MockSubscription["billingInterval"],
+    startDate: api.start_date,
+    nextBillingDate: api.next_billing_date,
+    cancelledDate: api.cancelled_date,
+  };
 }
 
-const REQUEST_CONFIG: Record<
-  RequestKind,
-  {
-    title: string;
-    description: (ref: string) => string;
-    confirmLabel: string;
-    destructive: boolean;
-    nextStatus: MockSubscription["status"];
-  }
-> = {
-  change_plan: {
-    title: "Request plan change",
-    description: (ref) =>
-      `Submit a request to change the plan for ${ref}. Our team will review and contact you within 1 business day.`,
-    confirmLabel: "Submit request",
-    destructive: false,
-    nextStatus: "pending",
-  },
-  pause: {
-    title: "Request subscription pause",
-    description: (ref) =>
-      `Submit a pause request for ${ref}. Billing will be suspended once approved. This is a demo — no request is sent.`,
-    confirmLabel: "Submit pause request",
-    destructive: false,
-    nextStatus: "pending",
-  },
-  cancel: {
-    title: "Request cancellation",
-    description: (ref) =>
-      `Submit a cancellation request for ${ref}. Your subscription will remain active until the current period ends. This is a demo — no request is sent.`,
-    confirmLabel: "Request cancellation",
-    destructive: true,
-    nextStatus: "cancelled",
-  },
-};
-
 // ---------------------------------------------------------------------------
-// Page
+// Page — customer portal (read-only + confirm own quotation)
 // ---------------------------------------------------------------------------
 
 export default function PortalSubscriptionsPage() {
-  const initialSubs = useMemo(
-    () => MOCK_SUBSCRIPTIONS.filter((s) => s.customerId === DEMO_CUSTOMER.id),
-    []
-  );
-
-  const [subs, setSubs] = useState<MockSubscription[]>(initialSubs);
+  const [subs, setSubs] = useState<MockSubscription[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [usingMock, setUsingMock] = useState(false);
   const [selectedSub, setSelectedSub] = useState<MockSubscription | null>(null);
-  const [pendingRequest, setPendingRequest] = useState<PendingRequest | null>(null);
+  const [confirmingSub, setConfirmingSub] = useState<MockSubscription | null>(null);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
 
-  function applyRequest(kind: RequestKind, id: string) {
-    const nextStatus = REQUEST_CONFIG[kind].nextStatus;
-    setSubs((prev) =>
-      prev.map((s) =>
-        s.id === id
-          ? {
-              ...s,
-              status: nextStatus,
-              cancelledDate:
-                kind === "cancel"
-                  ? new Date().toISOString().slice(0, 10)
-                  : s.cancelledDate,
-              nextBillingDate:
-                kind === "cancel" ? null : s.nextBillingDate,
-            }
-          : s
-      )
-    );
-    setSelectedSub((prev) =>
-      prev?.id === id ? { ...prev, status: nextStatus } : prev
-    );
-    setPendingRequest(null);
+  // ── Fetch subscriptions (backend enforces customer isolation) ─────────────
+  useEffect(() => {
+    async function load() {
+      try {
+        const token = getSupabaseToken();
+        const { data } = await apiClient.get<ApiSubscription[]>(
+          "/subscriptions?limit=100",
+          token ? { token } : undefined
+        );
+        if (data && Array.isArray(data)) {
+          setSubs(data.map(adaptSubscription));
+          setUsingMock(false);
+        }
+      } catch {
+        // Fall back to mock data filtered by demo customer id
+        setSubs(MOCK_SUBSCRIPTIONS.filter((s) => s.customerId === DEMO_CUSTOMER.id));
+        setUsingMock(true);
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  // ── Confirm quotation (the only write action customers can perform) ───────
+  async function confirmSubscription(sub: MockSubscription) {
+    setConfirmError(null);
+
+    if (!usingMock) {
+      try {
+        const token = getSupabaseToken();
+        await apiClient.post(
+          `/subscriptions/${sub.id}/confirm`,
+          {},
+          token ? { token } : undefined
+        );
+        // Refresh
+        setSubs((prev) =>
+          prev.map((s) => (s.id === sub.id ? { ...s, status: "confirmed" } : s))
+        );
+        setSelectedSub((prev) =>
+          prev?.id === sub.id ? { ...prev, status: "confirmed" } : prev
+        );
+      } catch (err) {
+        setConfirmError(err instanceof Error ? err.message : "Confirm failed");
+      }
+    } else {
+      // Mock fallback
+      setSubs((prev) =>
+        prev.map((s) => (s.id === sub.id ? { ...s, status: "confirmed" } : s))
+      );
+      setSelectedSub((prev) =>
+        prev?.id === sub.id ? { ...prev, status: "confirmed" } : prev
+      );
+    }
+    setConfirmingSub(null);
   }
 
   return (
@@ -111,16 +120,33 @@ export default function PortalSubscriptionsPage() {
         <div>
           <h1 className="text-xl font-semibold text-foreground">My Subscriptions</h1>
           <p className="mt-0.5 text-sm text-muted-foreground">
-            Manage your active plans and billing
+            View your active plans and billing
           </p>
         </div>
-        <span className="rounded-md bg-muted px-2 py-1 text-xs font-medium text-muted-foreground">
-          Demo — requests are local only
-        </span>
+        {usingMock && (
+          <span className="flex items-center gap-1.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 px-2 py-1 text-xs font-medium text-amber-700 dark:text-amber-300">
+            <WifiOff className="size-3" />
+            Demo data
+          </span>
+        )}
       </div>
 
+      {/* Error banner */}
+      {confirmError && (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive flex items-center justify-between gap-2">
+          {confirmError}
+          <button className="text-xs underline shrink-0" onClick={() => setConfirmError(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Subscription cards */}
-      {subs.length === 0 ? (
+      {loading ? (
+        <div className="rounded-xl border border-border bg-card p-12 text-center text-sm text-muted-foreground">
+          Loading your subscriptions…
+        </div>
+      ) : subs.length === 0 ? (
         <div className="rounded-xl border border-border bg-card p-12 text-center text-sm text-muted-foreground">
           You have no subscriptions yet.
         </div>
@@ -131,7 +157,7 @@ export default function PortalSubscriptionsPage() {
               key={sub.id}
               sub={sub}
               onView={setSelectedSub}
-              onRequest={(kind) => setPendingRequest({ kind, sub })}
+              onConfirm={() => setConfirmingSub(sub)}
             />
           ))}
         </div>
@@ -141,23 +167,19 @@ export default function PortalSubscriptionsPage() {
       <SubscriptionDetailDrawer
         sub={selectedSub}
         onClose={() => setSelectedSub(null)}
-        onRequest={(kind, sub) => setPendingRequest({ kind, sub })}
+        onConfirm={(sub) => setConfirmingSub(sub)}
       />
 
-      {/* Confirm request dialog */}
-      {pendingRequest && (
+      {/* Confirm quotation dialog */}
+      {confirmingSub && (
         <ConfirmDialog
           open
-          onOpenChange={(open) => { if (!open) setPendingRequest(null); }}
-          title={REQUEST_CONFIG[pendingRequest.kind].title}
-          description={REQUEST_CONFIG[pendingRequest.kind].description(
-            pendingRequest.sub.reference
-          )}
-          confirmLabel={REQUEST_CONFIG[pendingRequest.kind].confirmLabel}
-          destructive={REQUEST_CONFIG[pendingRequest.kind].destructive}
-          onConfirm={() =>
-            applyRequest(pendingRequest.kind, pendingRequest.sub.id)
-          }
+          onOpenChange={(open) => { if (!open) setConfirmingSub(null); }}
+          title="Confirm subscription"
+          description={`Confirm ${confirmingSub.reference}. This accepts the quoted terms and moves the subscription to confirmed status.`}
+          confirmLabel="Confirm subscription"
+          destructive={false}
+          onConfirm={() => confirmSubscription(confirmingSub)}
         />
       )}
     </div>
@@ -171,12 +193,11 @@ export default function PortalSubscriptionsPage() {
 interface CardProps {
   sub: MockSubscription;
   onView: (sub: MockSubscription) => void;
-  onRequest: (kind: RequestKind) => void;
+  onConfirm: () => void;
 }
 
-function SubscriptionCard({ sub, onView, onRequest }: CardProps) {
-  const isManageable =
-    sub.status === "active" || sub.status === "pending";
+function SubscriptionCard({ sub, onView, onConfirm }: CardProps) {
+  const isQuotation = sub.status === "quotation" || sub.status === "draft";
 
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-border bg-card p-4">
@@ -202,13 +223,7 @@ function SubscriptionCard({ sub, onView, onRequest }: CardProps) {
         <dt>Started</dt>
         <dd>{formatDate(sub.startDate)}</dd>
         <dt>Next billing</dt>
-        <dd
-          className={cn(
-            sub.status === "overdue" && "text-orange-600 dark:text-orange-400 font-medium"
-          )}
-        >
-          {formatDate(sub.nextBillingDate)}
-        </dd>
+        <dd>{formatDate(sub.nextBillingDate)}</dd>
       </dl>
 
       {/* Actions */}
@@ -220,23 +235,14 @@ function SubscriptionCard({ sub, onView, onRequest }: CardProps) {
           <Eye className="size-3" />
           Details
         </button>
-        {isManageable && (
-          <>
-            <button
-              onClick={() => onRequest("pause")}
-              className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium border border-border hover:bg-muted transition-colors"
-            >
-              <PauseCircle className="size-3" />
-              Pause
-            </button>
-            <button
-              onClick={() => onRequest("cancel")}
-              className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium border border-border text-destructive hover:bg-destructive/10 transition-colors"
-            >
-              <XCircle className="size-3" />
-              Cancel
-            </button>
-          </>
+        {isQuotation && (
+          <button
+            onClick={onConfirm}
+            className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium border border-border bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+          >
+            <CheckCircle2 className="size-3" />
+            Confirm
+          </button>
         )}
       </div>
     </div>
@@ -250,13 +256,13 @@ function SubscriptionCard({ sub, onView, onRequest }: CardProps) {
 interface DrawerProps {
   sub: MockSubscription | null;
   onClose: () => void;
-  onRequest: (kind: RequestKind, sub: MockSubscription) => void;
+  onConfirm: (sub: MockSubscription) => void;
 }
 
-function SubscriptionDetailDrawer({ sub, onClose, onRequest }: DrawerProps) {
+function SubscriptionDetailDrawer({ sub, onClose, onConfirm }: DrawerProps) {
   if (!sub) return null;
 
-  const isManageable = sub.status === "active" || sub.status === "pending";
+  const isQuotation = sub.status === "quotation" || sub.status === "draft";
 
   return (
     <Dialog.Root open modal onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -314,20 +320,11 @@ function SubscriptionDetailDrawer({ sub, onClose, onRequest }: DrawerProps) {
               <dt className="text-muted-foreground">Started</dt>
               <dd>{formatDate(sub.startDate)}</dd>
               <dt className="text-muted-foreground">Next billing</dt>
-              <dd
-                className={cn(
-                  sub.status === "overdue" &&
-                    "text-orange-600 dark:text-orange-400 font-medium"
-                )}
-              >
-                {formatDate(sub.nextBillingDate)}
-              </dd>
+              <dd>{formatDate(sub.nextBillingDate)}</dd>
               {sub.cancelledDate && (
                 <>
-                  <dt className="text-muted-foreground">Cancelled</dt>
-                  <dd className="text-destructive">
-                    {formatDate(sub.cancelledDate)}
-                  </dd>
+                  <dt className="text-muted-foreground">Closed</dt>
+                  <dd className="text-destructive">{formatDate(sub.cancelledDate)}</dd>
                 </>
               )}
             </dl>
@@ -339,31 +336,25 @@ function SubscriptionDetailDrawer({ sub, onClose, onRequest }: DrawerProps) {
                 Your next renewal is on {formatDate(sub.nextBillingDate)}.
               </div>
             )}
+
+            {/* Quotation notice */}
+            {isQuotation && (
+              <div className="flex items-center gap-2 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/30 px-3 py-2 text-xs text-blue-700 dark:text-blue-300">
+                <CheckCircle2 className="size-3.5 shrink-0" />
+                This subscription is a quotation. Review the terms and confirm to activate billing.
+              </div>
+            )}
           </div>
 
-          {/* Footer actions */}
-          {isManageable && (
-            <div className="border-t border-border px-5 py-4 flex flex-wrap gap-2">
+          {/* Footer — only show confirm for quotations */}
+          {isQuotation && (
+            <div className="border-t border-border px-5 py-4">
               <button
-                onClick={() => onRequest("change_plan", sub)}
-                className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium border border-border hover:bg-muted transition-colors"
+                onClick={() => onConfirm(sub)}
+                className="flex items-center justify-center gap-1.5 w-full rounded-md px-3 py-2 text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
               >
-                <RefreshCw className="size-3.5" />
-                Request plan change
-              </button>
-              <button
-                onClick={() => onRequest("pause", sub)}
-                className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium border border-border hover:bg-muted transition-colors"
-              >
-                <PauseCircle className="size-3.5" />
-                Request pause
-              </button>
-              <button
-                onClick={() => onRequest("cancel", sub)}
-                className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium border border-border text-destructive hover:bg-destructive/10 transition-colors"
-              >
-                <XCircle className="size-3.5" />
-                Request cancellation
+                <CheckCircle2 className="size-4" />
+                Confirm subscription
               </button>
             </div>
           )}

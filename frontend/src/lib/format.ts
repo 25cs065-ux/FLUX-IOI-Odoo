@@ -85,3 +85,34 @@ export function formatDate(iso: string | null | undefined): string {
 export function formatLabel(raw: string): string {
   return raw.charAt(0).toUpperCase() + raw.slice(1).replace(/[_-]/g, " ");
 }
+
+/**
+ * Format a decimal string as Indian Rupees (₹) using the en-IN locale.
+ * The backend sends all money values as decimal strings e.g. "159.30".
+ *
+ * e.g. formatDecimalInr("159.30")      → "₹159.30"
+ *      formatDecimalInr("74300000.00") → "₹7.43Cr"
+ *
+ * Returns "₹0.00" for null, undefined or unparseable values.
+ */
+export function formatDecimalInr(value: string | null | undefined): string {
+  if (!value) return "₹0.00";
+  const num = parseFloat(value);
+  if (isNaN(num)) return "₹0.00";
+  if (num >= 10_000_000) {
+    return `₹${(num / 10_000_000).toLocaleString("en-IN", {
+      maximumFractionDigits: 1,
+    })}Cr`;
+  }
+  if (num >= 100_000) {
+    return `₹${(num / 100_000).toLocaleString("en-IN", {
+      maximumFractionDigits: 1,
+    })}L`;
+  }
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(num);
+}

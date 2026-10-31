@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useMemo } from "react";
-import { Printer, X, DollarSign } from "lucide-react";
+import { useState, useEffect } from "react";
+import { Printer, X, DollarSign, WifiOff } from "lucide-react";
 import { Dialog } from "@base-ui/react/dialog";
 import { cn } from "cn";
 
@@ -9,6 +9,32 @@ import { DataTable, StatusBadge, type ColumnDef } from "@/components/shared";
 import { DEMO_CUSTOMER } from "@/mocks/demo-customer";
 import { MOCK_INVOICES, type MockInvoice } from "@/mocks/invoices";
 import { formatInrCentsFull, formatDate } from "@/lib/format";
+import { apiClient } from "@/lib/api-client";
+import { getSupabaseToken } from "@/lib/supabase-token";
+import type { ApiInvoice } from "@/types/api";
+
+// ---------------------------------------------------------------------------
+// Adapter
+// ---------------------------------------------------------------------------
+
+function adaptInvoice(api: ApiInvoice): MockInvoice {
+  const totalCents = Math.round(parseFloat(api.total_amount) * 100);
+  const paidCents = Math.round(parseFloat(api.paid_amount) * 100);
+  return {
+    id: api.id,
+    invoiceNumber: api.invoice_number,
+    customerId: api.customer_id,
+    customerName: api.customer_name,
+    subscriptionId: api.subscription_id ?? null,
+    status: api.status as MockInvoice["status"],
+    totalCents,
+    paidCents,
+    currency: api.currency,
+    issuedDate: api.issued_date ?? "",
+    dueDate: api.due_date ?? "",
+    paidDate: api.paid_date ?? null,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Column definitions
@@ -99,18 +125,95 @@ function buildColumns(
 // ---------------------------------------------------------------------------
 
 export default function PortalInvoicesPage() {
-  const myInvoices = useMemo(
-    () => MOCK_INVOICES.filter((i) => i.customerId === DEMO_CUSTOMER.id),
-    []
-  );
+  const [myInvoices, setMyInvoices] = useState<MockInvoice[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [usingMock, setUsingMock] = useState(false);
+  const [selectedInvoice, setSelectedInvoice] = useState<MockInvoice | null>(null);
 
-  const [selectedInvoice, setSelectedInvoice] = useState<MockInvoice | null>(
-    null
-  );
-  const columns = useMemo(() => buildColumns(setSelectedInvoice), []);
+  useEffect(() => {
+    async function load() {
+      try {
+        const token = getSupabaseToken();
+        const { data } = await apiClient.get<ApiInvoice[]>(
+          "/invoices?limit=100",
+          token ? { token } : undefined
+        );
+        if (data && Array.isArray(data)) {
+          setMyInvoices(data.map(adaptInvoice));
+          setUsingMock(false);
+        }
+      } catch {
+        setMyInvoices(MOCK_INVOICES.filter((i) => i.customerId === DEMO_CUSTOMER.id));
+        setUsingMock(true);
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  const columns = [
+    {
+      key: "invoiceNumber",
+      header: "Invoice #",
+      cell: (row: MockInvoice) => (
+        <span className="font-mono text-xs font-medium">{row.invoiceNumber}</span>
+      ),
+    },
+    {
+      key: "issuedDate",
+      header: "Issued",
+      cell: (row: MockInvoice) => formatDate(row.issuedDate),
+      hideOnMobile: true,
+    },
+    {
+      key: "dueDate",
+      header: "Due",
+      cell: (row: MockInvoice) => (
+        <span className={cn(row.status === "overdue" ? "text-orange-600 dark:text-orange-400 font-medium" : "")}>
+          {formatDate(row.dueDate)}
+        </span>
+      ),
+      hideOnMobile: true,
+    },
+    {
+      key: "totalCents",
+      header: "Amount",
+      cell: (row: MockInvoice) => (
+        <span className="tabular-nums font-medium">{formatInrCentsFull(row.totalCents)}</span>
+      ),
+    },
+    {
+      key: "paidCents",
+      header: "Balance due",
+      cell: (row: MockInvoice) => {
+        const balance = row.totalCents - row.paidCents;
+        return (
+          <span className={cn("tabular-nums", balance > 0 ? "text-destructive font-medium" : "text-green-600 dark:text-green-400")}>
+            {formatInrCentsFull(balance)}
+          </span>
+        );
+      },
+      hideOnMobile: true,
+    },
+    {
+      key: "status",
+      header: "Status",
+      cell: (row: MockInvoice) => <StatusBadge status={row.status} />,
+    },
+    {
+      key: "_view",
+      header: "",
+      cell: (row: MockInvoice) => (
+        <button onClick={() => setSelectedInvoice(row)} className="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2">
+          View
+        </button>
+      ),
+    },
+  ] satisfies ColumnDef<MockInvoice>[];
 
   const outstandingCents = myInvoices
-    .filter((i) => i.status === "pending" || i.status === "overdue")
+    .filter((i) => i.status === "sent" || i.status === "overdue" || i.status === "partial")
     .reduce((acc, i) => acc + (i.totalCents - i.paidCents), 0);
 
   return (
@@ -123,6 +226,12 @@ export default function PortalInvoicesPage() {
             View and download your invoices
           </p>
         </div>
+        {usingMock && (
+          <span className="flex items-center gap-1.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 px-2 py-1 text-xs font-medium text-amber-700 dark:text-amber-300">
+            <WifiOff className="size-3" />
+            Demo data
+          </span>
+        )}
       </div>
 
       {/* Outstanding notice */}
@@ -146,7 +255,7 @@ export default function PortalInvoicesPage() {
           pageSize={10}
           searchPlaceholder="Search by invoice number or status…"
           searchKeys={["invoiceNumber", "status"]}
-          emptyMessage="You have no invoices yet."
+          emptyMessage={loading ? "Loading…" : "You have no invoices yet."}
         />
       </div>
 

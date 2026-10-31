@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import {
   CreditCard,
   CheckCircle2,
@@ -11,6 +11,8 @@ import {
   PauseCircle,
   PlayCircle,
   X,
+  RefreshCw,
+  WifiOff,
 } from "lucide-react";
 import { Dialog } from "@base-ui/react/dialog";
 import { cn } from "cn";
@@ -27,7 +29,34 @@ import {
   MOCK_SUBSCRIPTIONS,
   type MockSubscription,
 } from "@/mocks/subscriptions";
-import { formatCents, formatDate, formatLabel } from "@/lib/format";
+import { formatCents, formatDate, formatLabel, formatDecimalInr } from "@/lib/format";
+import { apiClient, buildQuery } from "@/lib/api-client";
+import { getSupabaseToken } from "@/lib/supabase-token";
+import type { ApiSubscription } from "@/types/api";
+
+// ---------------------------------------------------------------------------
+// Adapter — map backend response to the shape the UI expects
+// ---------------------------------------------------------------------------
+
+function adaptSubscription(api: ApiSubscription): MockSubscription {
+  // Convert decimal string amount to cents for reuse with existing formatCents.
+  const amountCents = Math.round(parseFloat(api.amount) * 100);
+  return {
+    id: api.id,
+    reference: api.reference,
+    customerId: api.customer_id,
+    customerName: api.customer_name,
+    planId: api.plan_id,
+    planName: api.plan_name,
+    status: api.status as MockSubscription["status"],
+    amountCents,
+    currency: api.currency,
+    billingInterval: api.billing_interval as MockSubscription["billingInterval"],
+    startDate: api.start_date,
+    nextBillingDate: api.next_billing_date,
+    cancelledDate: api.cancelled_date,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -37,13 +66,16 @@ type SubStatus = MockSubscription["status"];
 
 const STATUS_FILTER_OPTIONS: { label: string; value: SubStatus | "all" }[] = [
   { label: "All", value: "all" },
+  { label: "Draft", value: "draft" },
+  { label: "Quotation", value: "quotation" },
+  { label: "Confirmed", value: "confirmed" },
   { label: "Active", value: "active" },
-  { label: "Pending", value: "pending" },
-  { label: "Overdue", value: "overdue" },
-  { label: "Cancelled", value: "cancelled" },
+  { label: "Paused", value: "paused" },
+  { label: "Closed", value: "closed" },
 ];
 
-type ActionKind = "confirm" | "pause" | "resume" | "cancel";
+// Backend action names
+type ActionKind = "activate" | "pause" | "resume" | "close" | "confirm";
 
 interface PendingAction {
   kind: ActionKind;
@@ -52,14 +84,23 @@ interface PendingAction {
 
 const ACTION_CONFIG: Record<
   ActionKind,
-  { title: string; description: (ref: string) => string; confirmLabel: string; destructive: boolean }
+  { title: string; description: (ref: string) => string; confirmLabel: string; destructive: boolean; endpoint: string }
 > = {
   confirm: {
     title: "Confirm subscription",
     description: (ref) =>
-      `Activate ${ref} immediately. The customer will be billed on the next billing date.`,
-    confirmLabel: "Confirm subscription",
+      `Confirm ${ref} — moves it from quotation/draft to confirmed status.`,
+    confirmLabel: "Confirm",
     destructive: false,
+    endpoint: "confirm",
+  },
+  activate: {
+    title: "Activate subscription",
+    description: (ref) =>
+      `Activate ${ref}. The customer will be billed on the next billing date.`,
+    confirmLabel: "Activate",
+    destructive: false,
+    endpoint: "activate",
   },
   pause: {
     title: "Pause subscription",
@@ -67,6 +108,7 @@ const ACTION_CONFIG: Record<
       `Pause ${ref}. No invoices will be generated while the subscription is paused.`,
     confirmLabel: "Pause",
     destructive: false,
+    endpoint: "pause",
   },
   resume: {
     title: "Resume subscription",
@@ -74,13 +116,15 @@ const ACTION_CONFIG: Record<
       `Resume ${ref}. Billing will restart on the next billing cycle.`,
     confirmLabel: "Resume",
     destructive: false,
+    endpoint: "resume",
   },
-  cancel: {
-    title: "Cancel subscription",
+  close: {
+    title: "Close subscription",
     description: (ref) =>
-      `Cancel ${ref} at end of the current period. This action cannot be undone.`,
-    confirmLabel: "Cancel subscription",
+      `Close ${ref}. This is permanent and cannot be undone.`,
+    confirmLabel: "Close subscription",
     destructive: true,
+    endpoint: "close",
   },
 };
 
@@ -95,33 +139,20 @@ function buildTimeline(sub: MockSubscription): TimelineEvent[] {
   const events: TimelineEvent[] = [
     { date: sub.startDate, label: "Subscription created", colour: "bg-green-500" },
   ];
-  if (sub.status === "active" || sub.status === "overdue") {
-    events.push({
-      date: sub.startDate,
-      label: "Activated",
-      colour: "bg-blue-500",
-    });
+  if (sub.status === "active") {
+    events.push({ date: sub.startDate, label: "Activated", colour: "bg-blue-500" });
   }
-  if (sub.status === "pending") {
-    events.push({
-      date: sub.startDate,
-      label: "Awaiting confirmation",
-      colour: "bg-yellow-500",
-    });
+  if (sub.status === "confirmed") {
+    events.push({ date: sub.startDate, label: "Confirmed", colour: "bg-blue-400" });
   }
-  if (sub.status === "overdue") {
-    events.push({
-      date: sub.nextBillingDate ?? sub.startDate,
-      label: "Payment overdue",
-      colour: "bg-orange-500",
-    });
+  if (sub.status === "quotation" || sub.status === "draft") {
+    events.push({ date: sub.startDate, label: "Awaiting confirmation", colour: "bg-yellow-500" });
+  }
+  if (sub.status === "paused") {
+    events.push({ date: sub.startDate, label: "Paused", colour: "bg-sky-500" });
   }
   if (sub.cancelledDate) {
-    events.push({
-      date: sub.cancelledDate,
-      label: "Cancelled",
-      colour: "bg-red-500",
-    });
+    events.push({ date: sub.cancelledDate, label: "Closed", colour: "bg-red-500" });
   }
   return events;
 }
@@ -204,39 +235,98 @@ function buildColumns(
 export default function SubscriptionsPage() {
   // ── State ────────────────────────────────────────────────────────────────
   const [subs, setSubs] = useState<MockSubscription[]>(MOCK_SUBSCRIPTIONS);
+  const [loading, setLoading] = useState(true);
+  const [apiError, setApiError] = useState<string | null>(null);
+  const [usingMock, setUsingMock] = useState(false);
+
   const [statusFilter, setStatusFilter] = useState<SubStatus | "all">("all");
   const [selectedSub, setSelectedSub] = useState<MockSubscription | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  // ── Fetch from API ───────────────────────────────────────────────────────
+  const fetchSubs = useCallback(async () => {
+    setLoading(true);
+    setApiError(null);
+    try {
+      const token = getSupabaseToken();
+      const qs = buildQuery({ status: statusFilter === "all" ? undefined : statusFilter, limit: 100 });
+      const { data } = await apiClient.get<ApiSubscription[]>(
+        `/subscriptions${qs}`,
+        token ? { token } : undefined
+      );
+      if (data && Array.isArray(data)) {
+        setSubs(data.map(adaptSubscription));
+        setUsingMock(false);
+      }
+    } catch {
+      // Backend unavailable — fall back to mock data silently
+      setSubs(MOCK_SUBSCRIPTIONS);
+      setUsingMock(true);
+    } finally {
+      setLoading(false);
+    }
+  }, [statusFilter]);
+
+  useEffect(() => { fetchSubs(); }, [fetchSubs]);
 
   // ── Derived ──────────────────────────────────────────────────────────────
   const filteredSubs = useMemo(
     () =>
-      statusFilter === "all"
+      statusFilter === "all" || !usingMock
         ? subs
         : subs.filter((s) => s.status === statusFilter),
-    [subs, statusFilter]
+    [subs, statusFilter, usingMock]
   );
 
   const stats = useMemo(() => {
     const active = subs.filter((s) => s.status === "active").length;
-    const pending = subs.filter((s) => s.status === "pending").length;
-    const overdue = subs.filter((s) => s.status === "overdue").length;
+    const confirmed = subs.filter((s) => s.status === "confirmed").length;
+    const paused = subs.filter((s) => s.status === "paused").length;
     const mrr = subs
       .filter((s) => s.status === "active" && s.billingInterval === "monthly")
       .reduce((acc, s) => acc + s.amountCents, 0);
     const annualAsMrr = subs
       .filter((s) => s.status === "active" && s.billingInterval === "annual")
       .reduce((acc, s) => acc + Math.round(s.amountCents / 12), 0);
-    return { active, pending, overdue, mrr: mrr + annualAsMrr };
+    return { active, confirmed, paused, mrr: mrr + annualAsMrr };
   }, [subs]);
 
-  // ── Mutations (local mock state only) ───────────────────────────────────
-  function applyAction(action: ActionKind, id: string) {
+  // ── Mutations (API with local fallback) ──────────────────────────────────
+  async function applyAction(action: ActionKind, id: string) {
+    setActionLoading(true);
+    setActionError(null);
+
+    if (!usingMock) {
+      try {
+        const token = getSupabaseToken();
+        await apiClient.post(
+          `/subscriptions/${id}/${ACTION_CONFIG[action].endpoint}`,
+          {},
+          token ? { token } : undefined
+        );
+        // Re-fetch to get the canonical updated state
+        await fetchSubs();
+        setPendingAction(null);
+        setSelectedSub(null);
+        setActionLoading(false);
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Action failed";
+        setActionError(msg);
+        setActionLoading(false);
+        return;
+      }
+    }
+
+    // Mock fallback — update local state
     const nextStatus: Record<ActionKind, SubStatus> = {
-      confirm: "active",
-      pause: "pending",
+      confirm: "confirmed",
+      activate: "active",
+      pause: "paused",
       resume: "active",
-      cancel: "cancelled",
+      close: "closed",
     };
     setSubs((prev) =>
       prev.map((s) =>
@@ -245,20 +335,20 @@ export default function SubscriptionsPage() {
               ...s,
               status: nextStatus[action],
               cancelledDate:
-                action === "cancel"
+                action === "close"
                   ? new Date().toISOString().slice(0, 10)
                   : s.cancelledDate,
               nextBillingDate:
-                action === "cancel" ? null : s.nextBillingDate,
+                action === "close" ? null : s.nextBillingDate,
             }
           : s
       )
     );
-    // Refresh the detail drawer if open
     setSelectedSub((prev) =>
       prev?.id === id ? { ...prev, status: nextStatus[action] } : prev
     );
     setPendingAction(null);
+    setActionLoading(false);
   }
 
   // ── Columns ──────────────────────────────────────────────────────────────
@@ -275,10 +365,38 @@ export default function SubscriptionsPage() {
             Manage recurring billing relationships
           </p>
         </div>
-        <span className="rounded-md bg-muted px-2 py-1 text-xs font-medium text-muted-foreground">
-          Demo data — actions are local only
-        </span>
+        <div className="flex items-center gap-2">
+          {usingMock && (
+            <span className="flex items-center gap-1.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 px-2 py-1 text-xs font-medium text-amber-700 dark:text-amber-300">
+              <WifiOff className="size-3" />
+              Demo data
+            </span>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={fetchSubs}
+            disabled={loading}
+          >
+            <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
+            Refresh
+          </Button>
+        </div>
       </div>
+
+      {/* API error banner */}
+      {actionError && (
+        <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          <AlertCircle className="size-4 shrink-0" />
+          {actionError}
+          <button
+            className="ml-auto text-xs underline"
+            onClick={() => setActionError(null)}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -290,21 +408,21 @@ export default function SubscriptionsPage() {
         />
         <StatCard
           title="MRR"
-          value={formatCents(stats.mrr, "USD")}
+          value={formatDecimalInr(String(stats.mrr / 100))}
           icon={CreditCard}
           description="Monthly recurring revenue"
         />
         <StatCard
-          title="Pending"
-          value={stats.pending}
+          title="Confirmed"
+          value={stats.confirmed}
           icon={Clock}
-          trend={{ direction: "neutral", label: "awaiting confirmation" }}
+          trend={{ direction: "neutral", label: "awaiting activation" }}
         />
         <StatCard
-          title="Overdue"
-          value={stats.overdue}
+          title="Paused"
+          value={stats.paused}
           icon={AlertCircle}
-          trend={stats.overdue > 0 ? { direction: "down", label: "need attention" } : undefined}
+          trend={stats.paused > 0 ? { direction: "down", label: "billing suspended" } : undefined}
         />
       </div>
 
@@ -317,7 +435,7 @@ export default function SubscriptionsPage() {
           pageSize={8}
           searchPlaceholder="Search by customer, plan, reference…"
           searchKeys={["customerName", "planName", "reference", "status"]}
-          emptyMessage="No subscriptions match the current filter."
+          emptyMessage={loading ? "Loading…" : "No subscriptions match the current filter."}
           filterControls={
             <div className="flex flex-wrap gap-1">
               {STATUS_FILTER_OPTIONS.map((opt) => (
@@ -350,12 +468,14 @@ export default function SubscriptionsPage() {
       {pendingAction && (
         <ConfirmDialog
           open
-          onOpenChange={(open) => { if (!open) setPendingAction(null); }}
+          onOpenChange={(open) => { if (!open) { setPendingAction(null); setActionError(null); } }}
           title={ACTION_CONFIG[pendingAction.kind].title}
           description={ACTION_CONFIG[pendingAction.kind].description(
             pendingAction.sub.reference
           )}
-          confirmLabel={ACTION_CONFIG[pendingAction.kind].confirmLabel}
+          confirmLabel={
+            actionLoading ? "Working…" : ACTION_CONFIG[pendingAction.kind].confirmLabel
+          }
           destructive={ACTION_CONFIG[pendingAction.kind].destructive}
           onConfirm={() => applyAction(pendingAction.kind, pendingAction.sub.id)}
         />
@@ -381,18 +501,21 @@ function SubscriptionDrawer({ sub, onClose, onAction }: DrawerProps) {
 
   const availableActions: ActionKind[] = (() => {
     switch (sub.status) {
-      case "pending": return ["confirm", "cancel"];
-      case "active": return ["pause", "cancel"];
-      case "overdue": return ["cancel"];
+      case "draft":
+      case "quotation": return ["confirm", "close"];
+      case "confirmed": return ["activate", "close"];
+      case "active": return ["pause", "close"];
+      case "paused": return ["resume", "close"];
       default: return [];
     }
   })();
 
   const actionIcons: Partial<Record<ActionKind, React.ReactNode>> = {
-    confirm: <PlayCircle className="size-3.5" />,
+    confirm: <CheckCircle2 className="size-3.5" />,
+    activate: <PlayCircle className="size-3.5" />,
     pause: <PauseCircle className="size-3.5" />,
     resume: <PlayCircle className="size-3.5" />,
-    cancel: <XCircle className="size-3.5" />,
+    close: <XCircle className="size-3.5" />,
   };
 
   return (
@@ -453,7 +576,7 @@ function SubscriptionDrawer({ sub, onClose, onAction }: DrawerProps) {
               />
               {sub.cancelledDate && (
                 <DetailRow
-                  label="Cancelled on"
+                  label="Closed on"
                   value={formatDate(sub.cancelledDate)}
                 />
               )}
@@ -492,7 +615,7 @@ function SubscriptionDrawer({ sub, onClose, onAction }: DrawerProps) {
               {availableActions.map((kind) => (
                 <Button
                   key={kind}
-                  variant={kind === "cancel" ? "destructive" : "outline"}
+                  variant={kind === "close" ? "destructive" : "outline"}
                   size="sm"
                   onClick={() => onAction(kind, sub)}
                 >

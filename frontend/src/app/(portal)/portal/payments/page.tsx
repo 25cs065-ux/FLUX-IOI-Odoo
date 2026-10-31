@@ -1,9 +1,39 @@
 "use client";
 
+import { useState, useEffect } from "react";
+import { WifiOff } from "lucide-react";
+
 import { DataTable, StatusBadge, type ColumnDef } from "@/components/shared";
 import { DEMO_CUSTOMER } from "@/mocks/demo-customer";
 import { MOCK_PAYMENTS, type MockPayment } from "@/mocks/payments";
 import { formatInrCentsFull, formatDate, formatLabel } from "@/lib/format";
+import { apiClient } from "@/lib/api-client";
+import { getSupabaseToken } from "@/lib/supabase-token";
+import type { ApiPayment } from "@/types/api";
+import type { PaymentMethod } from "@/mocks/payments";
+
+// ---------------------------------------------------------------------------
+// Adapter
+// ---------------------------------------------------------------------------
+
+function adaptPayment(api: ApiPayment): MockPayment {
+  const amountCents = Math.round(parseFloat(api.amount) * 100);
+  return {
+    id: api.id,
+    reference: api.payment_reference ?? api.id.slice(0, 8).toUpperCase(),
+    invoiceId: api.invoice_id,
+    invoiceNumber: api.invoice_number,
+    customerId: api.customer_id,
+    customerName: api.customer_name,
+    status: api.status as MockPayment["status"],
+    method: api.method as PaymentMethod,
+    date: api.payment_date,
+    amountCents,
+    currency: api.currency,
+    maskedAccount: null,
+    gatewayReference: null,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Column definitions
@@ -53,30 +83,41 @@ const COLUMNS: ColumnDef<MockPayment>[] = [
     header: "Status",
     cell: (row) => <StatusBadge status={row.status} />,
   },
-  {
-    key: "maskedAccount",
-    header: "Account",
-    cell: (row) =>
-      row.maskedAccount ? (
-        <span className="font-mono text-xs">{row.maskedAccount}</span>
-      ) : (
-        <span className="text-muted-foreground">—</span>
-      ),
-    hideOnMobile: true,
-  },
 ];
 
 // ---------------------------------------------------------------------------
-// Page — server component (no interactivity required)
+// Page
 // ---------------------------------------------------------------------------
 
 export default function PortalPaymentsPage() {
-  const myPayments = MOCK_PAYMENTS.filter(
-    (p) => p.customerId === DEMO_CUSTOMER.id
-  );
+  const [myPayments, setMyPayments] = useState<MockPayment[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [usingMock, setUsingMock] = useState(false);
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const token = getSupabaseToken();
+        const { data } = await apiClient.get<ApiPayment[]>(
+          "/payments?limit=100",
+          token ? { token } : undefined
+        );
+        if (data && Array.isArray(data)) {
+          setMyPayments(data.map(adaptPayment));
+          setUsingMock(false);
+        }
+      } catch {
+        setMyPayments(MOCK_PAYMENTS.filter((p) => p.customerId === DEMO_CUSTOMER.id));
+        setUsingMock(true);
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
 
   const totalPaidCents = myPayments
-    .filter((p) => p.status === "paid")
+    .filter((p) => p.status === "completed")
     .reduce((acc, p) => acc + p.amountCents, 0);
 
   return (
@@ -91,6 +132,12 @@ export default function PortalPaymentsPage() {
             All payments made on your account
           </p>
         </div>
+        {usingMock && (
+          <span className="flex items-center gap-1.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 px-2 py-1 text-xs font-medium text-amber-700 dark:text-amber-300">
+            <WifiOff className="size-3" />
+            Demo data
+          </span>
+        )}
       </div>
 
       {/* Summary */}
@@ -115,7 +162,7 @@ export default function PortalPaymentsPage() {
           pageSize={10}
           searchPlaceholder="Search by reference, invoice, method…"
           searchKeys={["reference", "invoiceNumber", "status", "method"]}
-          emptyMessage="No payment records found."
+          emptyMessage={loading ? "Loading…" : "No payment records found."}
         />
       </div>
     </div>
