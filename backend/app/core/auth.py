@@ -1,16 +1,11 @@
-from fastapi import HTTPException, status, Depends
+from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.core.supabase import supabase
+from typing import Dict, Any
 
-security = HTTPBearer(auto_error=False)
+security = HTTPBearer()
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    if not credentials or not credentials.credentials:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid authentication token"
-        )
-    
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> Dict[str, Any]:
     token = credentials.credentials
     try:
         user_res = supabase.auth.get_user(token)
@@ -23,24 +18,44 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Token verification failed: {str(e)}"
+            detail=f"Authentication failed: {str(e)}"
         )
-    
-    db_res = supabase.table("customers").select("*").eq("auth_user_id", user.id).execute()
-    if not db_res.data or len(db_res.data) == 0:
-        db_res = supabase.table("customers").select("*").eq("email", user.email).execute()
 
     role = "customer"
-    if db_res.data and len(db_res.data) > 0:
-        role = db_res.data[0].get("role", "customer")
+    user_id = user.id
+    email = user.email
+
+    try:
+        cust_res = supabase.table("customers").select("*").eq("auth_user_id", user.id).execute()
+        if cust_res.data and len(cust_res.data) > 0:
+            cust_record = cust_res.data[0]
+            role = cust_record.get("role", "customer")
+        else:
+            metadata = getattr(user, "user_metadata", {}) or {}
+            app_metadata = getattr(user, "app_metadata", {}) or {}
+            meta_role = app_metadata.get("role") or metadata.get("role")
+            
+            if meta_role in ("admin", "staff"):
+                role = meta_role
+            else:
+                is_confirmed = bool(getattr(user, "email_confirmed_at", None) or getattr(user, "confirmed_at", None))
+                if is_confirmed and email:
+                    match_res = supabase.table("customers").select("*").eq("email", email).is_("auth_user_id", "null").execute()
+                    if match_res.data and len(match_res.data) > 0:
+                        matched = match_res.data[0]
+                        role = matched.get("role", "customer")
+                        supabase.table("customers").update({"auth_user_id": user.id}).eq("id", matched["id"]).execute()
+    except Exception:
+        metadata = getattr(user, "user_metadata", {}) or {}
+        role = metadata.get("role", "customer")
 
     return {
-        "id": user.id,
-        "email": user.email,
-        "role": role
+        "id": user_id,
+        "email": email,
+        "role": role,
     }
 
-def require_admin(current_user: dict = Depends(get_current_user)):
+async def require_admin(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
     if current_user.get("role") != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
