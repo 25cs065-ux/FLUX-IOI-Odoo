@@ -7,4 +7,4 @@ pydantic-settings
 python-dotenv
 google-generativeai
 pytest
-httpxfaker
+httpx
