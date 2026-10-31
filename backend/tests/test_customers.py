@@ -111,3 +111,55 @@ def test_customer_cannot_deactivate_self(mock_sb):
         assert "is_active" not in called_payload
     finally:
         test_app.dependency_overrides.clear()
+
+
+LEGACY_ROWS = [
+    {"id": DUMMY_ID, "name": "Legacy Admin", "email": "admin@seed.brightloop.test", "auth_user_id": "a-1",
+     "role": "admin", "is_active": True, "created_at": "2026-10-31T17:22:00Z"},
+    {"id": "11111111-1111-1111-1111-111111111111", "name": "Current Customer",
+     "email": "customer_1@brightloop.example.com", "auth_user_id": "c-1", "role": "customer",
+     "is_active": True, "created_at": "2026-10-31T18:00:00Z"},
+]
+
+
+@patch("app.routers.customers.supabase")
+def test_list_and_read_return_legacy_test_domain_emails(mock_sb):
+    """Regression: three seeded admin/staff rows use @seed.brightloop.test, which EmailStr
+    rejects as a reserved domain; listing customers must not fail with a 500."""
+    test_app.dependency_overrides[get_current_user] = lambda: {"id": "admin-1", "email": "admin@test.com", "role": "admin"}
+    mock_table = MagicMock()
+    mock_table.select.return_value.order.return_value.range.return_value.execute.return_value.data = LEGACY_ROWS
+    mock_table.select.return_value.eq.return_value.execute.return_value.data = [LEGACY_ROWS[0]]
+    mock_sb.table.return_value = mock_table
+    try:
+        res = client.get("/customers/?limit=100&offset=1800")
+        assert res.status_code == 200, res.text
+        assert [c["email"] for c in res.json()] == ["admin@seed.brightloop.test", "customer_1@brightloop.example.com"]
+
+        res = client.get(f"/customers/{DUMMY_ID}")
+        assert res.status_code == 200 and res.json()["email"] == "admin@seed.brightloop.test"
+    finally:
+        test_app.dependency_overrides.clear()
+
+
+def test_create_and_update_still_validate_email():
+    from pydantic import ValidationError
+    from app.schemas.customer import CustomerCreate, CustomerUpdate
+
+    for bad in ("not-an-email", "admin@seed.brightloop.test"):
+        with pytest.raises(ValidationError):
+            CustomerCreate(name="Alice", email=bad)
+        with pytest.raises(ValidationError):
+            CustomerUpdate(email=bad)
+    assert CustomerCreate(name="Alice", email="alice@brightloop.example.com").email == "alice@brightloop.example.com"
+
+
+@patch("app.routers.customers.supabase")
+def test_create_endpoint_rejects_reserved_domain(mock_sb):
+    test_app.dependency_overrides[get_current_user] = lambda: {"id": "admin-1", "email": "admin@test.com", "role": "admin"}
+    try:
+        res = client.post("/customers/", json={"name": "Alice", "email": "alice@seed.brightloop.test"})
+        assert res.status_code == 422
+        mock_sb.table.return_value.insert.assert_not_called()
+    finally:
+        test_app.dependency_overrides.clear()
