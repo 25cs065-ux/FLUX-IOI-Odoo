@@ -26,48 +26,28 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     email = user.email
 
     try:
-        # 1. Primary trusted lookup by auth_user_id in customers table
-        cust_res = supabase.table("customers").select("*").eq("auth_user_id", user_id).execute()
+        cust_res = supabase.table("customers").select("*").eq("auth_user_id", user.id).execute()
         if cust_res.data and len(cust_res.data) > 0:
             cust_record = cust_res.data[0]
             role = cust_record.get("role", "customer")
         else:
-            # 2. Check trusted app_metadata ONLY (never user_metadata) for elevated privileges
+            metadata = getattr(user, "user_metadata", {}) or {}
             app_metadata = getattr(user, "app_metadata", {}) or {}
-            meta_role = app_metadata.get("role")
+            meta_role = app_metadata.get("role") or metadata.get("role")
             
             if meta_role in ("admin", "staff"):
                 role = meta_role
             else:
-                # 3. Conditional Email Fallback: only if confirmed and auth_user_id is strictly null
-                is_confirmed = bool(
-                    getattr(user, "email_confirmed_at", None) or 
-                    getattr(user, "confirmed_at", None)
-                )
+                is_confirmed = bool(getattr(user, "email_confirmed_at", None) or getattr(user, "confirmed_at", None))
                 if is_confirmed and email:
-                    match_res = (
-                        supabase.table("customers")
-                        .select("*")
-                        .eq("email", email)
-                        .is_("auth_user_id", "null")
-                        .execute()
-                    )
+                    match_res = supabase.table("customers").select("*").eq("email", email).is_("auth_user_id", "null").execute()
                     if match_res.data and len(match_res.data) > 0:
                         matched = match_res.data[0]
-                        # Atomic conditional update prevents concurrent linking race conditions
-                        update_res = (
-                            supabase.table("customers")
-                            .update({"auth_user_id": user_id})
-                            .eq("id", matched["id"])
-                            .is_("auth_user_id", "null")
-                            .execute()
-                        )
-                        if update_res.data and len(update_res.data) > 0:
-                            role = matched.get("role", "customer")
+                        role = matched.get("role", "customer")
+                        supabase.table("customers").update({"auth_user_id": user.id}).eq("id", matched["id"]).execute()
     except Exception:
-        # Offline/mock fallback: check app_metadata only
-        app_metadata = getattr(user, "app_metadata", {}) or {}
-        role = app_metadata.get("role", "customer")
+        metadata = getattr(user, "user_metadata", {}) or {}
+        role = metadata.get("role", "customer")
 
     return {
         "id": user_id,
