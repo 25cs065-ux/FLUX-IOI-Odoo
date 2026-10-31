@@ -4,7 +4,7 @@ Source: branch `feature/aadya-backend`. Everything below was read from the code 
 
 **Status labels:** ✅ implemented and tested · ⏳ not implemented yet · ⚠️ implemented but not verified against the live Supabase database
 
-> ⚠️ **Token checking happens in the team's shared auth module (`backend/app/core/auth.py`, on Vaidehi's branches).** These endpoints already call it, but until that module is merged and the server has Supabase credentials, any request with a token gets `503 {"detail": "Authentication is not configured on this server"}` (no token still gets `401`). Build against the contracts below (or the `frontend/src/mocks` folder). They won't change when it goes live.
+> ⚠️ **FastAPI checks the Supabase access token itself (`backend/app/core/supabase_jwt.py`): signature, expiry, audience and issuer.** Until the server has `SUPABASE_URL` set (plus `SUPABASE_JWT_SECRET` if the project still signs tokens with HS256), any request with a token gets `503 {"detail": "Authentication is not configured on this server"}`. No token still gets `401`. Build against the contracts below (or the `frontend/src/mocks` folder). They won't change when it goes live.
 
 ---
 
@@ -31,7 +31,7 @@ Authorization: Bearer <session.access_token>
 ```
 
 **Not decided or not verified yet:**
-- **Where the role comes from.** The shared auth module verifies the token with Supabase and reads the app role (`admin` / `staff` / `customer`) from the `customers.role` column, defaulting to `customer`. The token's own `role` claim is always `"authenticated"`. The frontend should not decide roles itself, and must never send an `X-User-Role` header: it is ignored.
+- **Where the role comes from.** The app role (`admin` / `staff` / `customer`) is read from the token's `app_metadata.role` (only the server can set it), otherwise from the `customers.role` column for the signed-in user, otherwise `customer`. `user_metadata`, the token's own `role` claim (always `"authenticated"`) and `X-User-Role` headers are ignored. The frontend should not decide roles itself.
 - ⚠️ **Supabase project settings:** email confirmation on/off, allowed redirect URLs, SMTP, and minimum password length. The test plan requires passwords **longer than 8 characters**, so validate that on the form too.
 - ⚠️ **Packages and env vars:** `frontend/package.json` has `next-auth` but no `@supabase/supabase-js`, and `.env.example` still has `NEXTAUTH_*` variables. These predate the Supabase Auth decision. Confirm with the team before building on NextAuth.
 
@@ -56,8 +56,8 @@ Authorization: Bearer <session.access_token>
 
 | Code | Meaning |
 |---|---|
-| `401` | No token. The response has a `WWW-Authenticate: Bearer` header |
-| `403` | The role isn't allowed |
+| `401` | No token, or an invalid or expired token (`"Token has expired"`). Refresh the Supabase session and retry once; if it fails again, sign the user out |
+| `403` | The role isn't allowed, or the account is disabled (`"This account is disabled"`) |
 | `503` | Auth isn't configured on the server yet (see the note at the top) |
 
 ---
