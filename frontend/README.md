@@ -1,6 +1,6 @@
 # Brightloop Subscription Platform
 
-Next.js (App Router) frontend for the Brightloop Subscription Platform, built with Tailwind CSS and shadcn/ui. Authentication uses NextAuth.js, which calls the FastAPI backend for login and issues the session token.
+Next.js (App Router) frontend for the Brightloop Subscription Platform, built with Tailwind CSS and shadcn/ui. Authentication uses Supabase Auth, with browser sessions stored in cookies for the Next.js proxy and FastAPI backend validation for protected API requests.
 
 ---
 

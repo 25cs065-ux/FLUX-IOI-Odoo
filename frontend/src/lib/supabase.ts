@@ -7,15 +7,16 @@
 //
 // The client is created lazily on first use so that server-side prerendering
 // does not fail when env vars are not present in the build environment.
-// (Auth pages are "use client" and only run in the browser where the vars
-// are injected by Next.js at runtime.)
+// The SSR client stores the session in cookies so the Next.js proxy can read
+// it during navigation and page refreshes.
 //
 // Usage:
 //   import { supabase } from "@/lib/supabase";
 //   const { data, error } = await supabase.auth.signInWithPassword({ email, password });
 // ---------------------------------------------------------------------------
 
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { createBrowserClient } from "@supabase/ssr";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 let _client: SupabaseClient | null = null;
 
@@ -38,7 +39,7 @@ function getClient(): SupabaseClient {
     );
   }
 
-  _client = createClient(supabaseUrl, supabaseAnonKey, {
+  _client = createBrowserClient(supabaseUrl, supabaseAnonKey, {
     auth: {
       autoRefreshToken: true,
       persistSession: true,

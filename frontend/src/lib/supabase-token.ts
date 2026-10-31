@@ -21,8 +21,8 @@ import type { Session } from "@supabase/supabase-js";
  * Return the current Supabase access token, or null when the user is not
  * signed in.
  *
- * On the server (SSR) this always returns null because localStorage is not
- * available — use server-side session helpers if you need SSR auth.
+ * This helper is browser-only — use a server-side session helper when
+ * checking authentication during SSR or in a server request.
  */
 export async function getSupabaseToken(): Promise<string | null> {
   const session = await getSupabaseSession();

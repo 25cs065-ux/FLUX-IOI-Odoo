@@ -2,8 +2,7 @@
 // proxy.ts — Route protection (Next.js 16)
 //
 // In Next.js 16 the middleware file is renamed to proxy.ts.
-// This file performs OPTIMISTIC session checks only, using the Supabase
-// session cookie that @supabase/supabase-js writes to the browser.
+// This file checks the Supabase session stored in cookies by @supabase/ssr.
 //
 // Important: This is a UI guard, NOT a security boundary.
 // The FastAPI backend enforces real authentication on every request.
@@ -23,6 +22,7 @@
 
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { createServerClient } from "@supabase/ssr";
 
 // Routes that require a logged-in session.
 // All paths not listed here or in PUBLIC_ROUTES are also protected.
@@ -42,30 +42,79 @@ const LOGIN_PATH = "/login";
 /**
  * Detect whether a Supabase session cookie is present.
  *
- * @supabase/supabase-js (non-SSR) stores the session in localStorage
- * AND sets a same-site cookie with the key pattern `sb-<ref>-auth-token`.
- * We look for that cookie as an optimistic session indicator.
+ * Supabase SSR stores sessions in `sb-<ref>-auth-token` cookies, which may be
+ * split into numbered chunks. The session itself is validated with getUser().
  *
- * This check is purely for redirect UX — it does NOT validate the token.
- * The FastAPI backend validates the JWT on every protected API call.
+ * This proxy only controls frontend redirects; the FastAPI backend validates
+ * the JWT on every protected API call.
  */
 function hasSupabaseSession(request: NextRequest): boolean {
-  for (const [name] of request.cookies) {
-    if (name.startsWith("sb-") && name.endsWith("-auth-token")) {
-      return true;
-    }
-  }
-  return false;
+  return request.cookies
+    .getAll()
+    .some(({ name }) => name.startsWith("sb-") && name.includes("-auth-token"));
 }
 
-export function proxy(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   const isAuthRoute = AUTH_ROUTES.some(
     (route) => pathname === route || pathname.startsWith(route + "/")
   );
 
-  const sessionPresent = hasSupabaseSession(request);
+  let response = NextResponse.next({ request });
+  const authResponseHeaders: Record<string, string> = {};
+  let sessionPresent = false;
+
+  if (hasSupabaseSession(request)) {
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+    if (!supabaseUrl || !supabaseAnonKey) {
+      throw new Error(
+        "[supabase] NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY " +
+          "must be set. Add them to frontend/.env.local (never commit that file)."
+      );
+    }
+
+    const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
+      cookies: {
+        getAll() {
+          return request.cookies.getAll();
+        },
+        setAll(cookiesToSet, headers) {
+          cookiesToSet.forEach(({ name, value }) => {
+            request.cookies.set(name, value);
+          });
+          response = NextResponse.next({ request });
+          cookiesToSet.forEach(({ name, value, options }) => {
+            response.cookies.set(name, value, options);
+          });
+          Object.assign(authResponseHeaders, headers);
+          Object.entries(headers).forEach(([name, value]) => {
+            response.headers.set(name, value);
+          });
+        },
+      },
+    });
+
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser();
+    if (error) throw error;
+    sessionPresent = Boolean(user);
+  }
+
+  function redirectWithAuthCookies(url: URL) {
+    const redirectResponse = NextResponse.redirect(url);
+    response.cookies.getAll().forEach(({ name, value, ...options }) => {
+      redirectResponse.cookies.set(name, value, options);
+    });
+    Object.entries(authResponseHeaders).forEach(([name, value]) => {
+      redirectResponse.headers.set(name, value);
+    });
+    return redirectResponse;
+  }
 
   // Unauthenticated user hitting a protected route → send to login
   if (!isAuthRoute && !sessionPresent) {
@@ -73,7 +122,7 @@ export function proxy(request: NextRequest) {
     url.pathname = LOGIN_PATH;
     // Preserve the intended destination so we can redirect back after login
     url.searchParams.set("next", pathname);
-    return NextResponse.redirect(url);
+    return redirectWithAuthCookies(url);
   }
 
   // Authenticated user hitting an auth route → send to dashboard
@@ -86,10 +135,10 @@ export function proxy(request: NextRequest) {
     const url = request.nextUrl.clone();
     url.pathname = DEFAULT_REDIRECT;
     url.searchParams.delete("next");
-    return NextResponse.redirect(url);
+    return redirectWithAuthCookies(url);
   }
 
-  return NextResponse.next();
+  return response;
 }
 
 export const config = {
