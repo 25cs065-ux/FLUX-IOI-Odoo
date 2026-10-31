@@ -6,11 +6,59 @@
 /**
  * Format cents as a localised currency string.
  * e.g. formatCents(4900, "USD") → "$49.00"
+ *
+ * Existing callers pass "USD" or row.currency — unchanged behaviour.
  */
 export function formatCents(cents: number, currency: string = "USD"): string {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(cents / 100);
+}
+
+/**
+ * Format a cent value as Indian Rupees (₹) using the en-IN locale.
+ * Uses compact notation for large values (≥ 1 lakh).
+ *
+ * e.g. formatInrCents(743000000) → "₹74.3L"
+ *      formatInrCents(4900)      → "₹49.00"
+ *
+ * This is a separate export so existing USD call-sites are not affected.
+ */
+export function formatInrCents(cents: number): string {
+  const rupees = cents / 100;
+  if (rupees >= 10_000_000) {
+    // ≥ 1 crore — show as "₹XCr"
+    return `₹${(rupees / 10_000_000).toLocaleString("en-IN", {
+      maximumFractionDigits: 1,
+    })}Cr`;
+  }
+  if (rupees >= 100_000) {
+    // ≥ 1 lakh — show as "₹XL"
+    return `₹${(rupees / 100_000).toLocaleString("en-IN", {
+      maximumFractionDigits: 1,
+    })}L`;
+  }
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(rupees);
+}
+
+/**
+ * Format a cent value as INR with full precision (no compact notation).
+ * Suitable for tooltips and detail views.
+ *
+ * e.g. formatInrCentsFull(743000000) → "₹74,30,000.00"
+ */
+export function formatInrCentsFull(cents: number): string {
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(cents / 100);
