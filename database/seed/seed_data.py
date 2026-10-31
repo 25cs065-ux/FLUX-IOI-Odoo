@@ -1,6 +1,7 @@
 
 import os
 import uuid
+
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from dotenv import load_dotenv
@@ -10,7 +11,7 @@ from supabase import create_client, Client
 # =====================================================================
 # CONFIGURATION & FLAGS
 # =====================================================================
-SMALL = False
+SMALL = True
 CLEANUP_PREVIOUS_SEED_DATA = False
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
