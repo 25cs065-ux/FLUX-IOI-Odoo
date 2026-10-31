@@ -97,7 +97,7 @@ export default function PortalPaymentsPage() {
   useEffect(() => {
     async function load() {
       try {
-        const token = getSupabaseToken();
+        const token = await getSupabaseToken();
         const { data } = await apiClient.get<ApiPayment[]>(
           "/payments?limit=100",
           token ? { token } : undefined

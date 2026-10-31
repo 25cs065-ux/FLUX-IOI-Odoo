@@ -250,7 +250,7 @@ export default function SubscriptionsPage() {
     setLoading(true);
     setApiError(null);
     try {
-      const token = getSupabaseToken();
+      const token = await getSupabaseToken();
       const qs = buildQuery({ status: statusFilter === "all" ? undefined : statusFilter, limit: 100 });
       const { data } = await apiClient.get<ApiSubscription[]>(
         `/subscriptions${qs}`,
@@ -300,7 +300,7 @@ export default function SubscriptionsPage() {
 
     if (!usingMock) {
       try {
-        const token = getSupabaseToken();
+        const token = await getSupabaseToken();
         await apiClient.post(
           `/subscriptions/${id}/${ACTION_CONFIG[action].endpoint}`,
           {},

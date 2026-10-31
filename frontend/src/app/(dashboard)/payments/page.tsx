@@ -188,7 +188,7 @@ export default function PaymentsPage() {
   const fetchPayments = useCallback(async () => {
     setLoading(true);
     try {
-      const token = getSupabaseToken();
+      const token = await getSupabaseToken();
       const qs = buildQuery({ status: statusFilter === "all" ? undefined : statusFilter, limit: 100 });
       const { data } = await apiClient.get<ApiPayment[]>(
         `/payments${qs}`,
@@ -233,7 +233,7 @@ export default function PaymentsPage() {
 
     if (!usingMock) {
       try {
-        const token = getSupabaseToken();
+        const token = await getSupabaseToken();
         const body: CreatePaymentBody = {
           invoice_id: data.invoiceId,
           amount: data.amount,

@@ -59,7 +59,7 @@ export default function PortalSubscriptionsPage() {
   useEffect(() => {
     async function load() {
       try {
-        const token = getSupabaseToken();
+        const token = await getSupabaseToken();
         const { data } = await apiClient.get<ApiSubscription[]>(
           "/subscriptions?limit=100",
           token ? { token } : undefined
@@ -85,7 +85,7 @@ export default function PortalSubscriptionsPage() {
 
     if (!usingMock) {
       try {
-        const token = getSupabaseToken();
+        const token = await getSupabaseToken();
         await apiClient.post(
           `/subscriptions/${sub.id}/confirm`,
           {},

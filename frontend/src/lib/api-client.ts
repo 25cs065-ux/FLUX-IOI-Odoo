@@ -1,24 +1,29 @@
 // ---------------------------------------------------------------------------
 // API Client
 //
-// A thin fetch wrapper that centralises base URL resolution, JSON
-// serialisation, authentication headers and error normalisation.
+// Thin fetch wrapper centralising:
+//   - Base URL:  NEXT_PUBLIC_API_URL (default http://localhost:8000)
+//   - Auth:      Bearer <supabase_access_token>
+//   - Errors:    ApiError with typed status + message
+//   - 401 flow:  refresh session once → retry → sign-out + redirect to /login
 //
-// Base URL is read from NEXT_PUBLIC_BACKEND_URL (browser-accessible).
-// No endpoint paths are hardcoded here — callers supply them.
+// Token lifecycle (callers don't need to manage this):
+//   - Pass { token } in RequestOptions for authenticated requests.
+//   - The refresh+retry path is handled automatically inside `request()`.
+//   - Never falls back to mock data on 401 or 403 — it throws ApiError.
 //
 // Usage:
 //   import { apiClient, buildQuery } from "@/lib/api-client";
 //
-//   // GET with query params
+//   // Authenticated GET
+//   const token = await getSupabaseToken();
 //   const { data } = await apiClient.get<Subscription[]>(
 //     "/subscriptions" + buildQuery({ status: "active", limit: 20 }),
 //     { token }
 //   );
 //
-//   // POST with auth token — pass the raw Supabase access_token string;
-//   // the "Bearer " prefix is added automatically.
-//   const { data } = await apiClient.post<Invoice>("/invoices", body, { token });
+//   // Unauthenticated POST (public endpoint)
+//   const { data } = await apiClient.post<Result>("/public/endpoint", body);
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -49,6 +54,11 @@ export interface RequestOptions {
   headers?: Record<string, string>;
   /** AbortSignal for request cancellation. */
   signal?: AbortSignal;
+  /**
+   * Internal flag — set to true on the one automatic retry after a token
+   * refresh. Prevents indefinite retry loops.
+   */
+  _isRetry?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -56,12 +66,10 @@ export interface RequestOptions {
 // ---------------------------------------------------------------------------
 
 /**
- * Build a URL query string from a plain object, omitting null/undefined values.
+ * Build a URL query string from a plain object, omitting null/undefined/empty values.
  *
  * buildQuery({ status: "active", limit: 20, offset: undefined })
  *   → "?status=active&limit=20"
- *
- * Returns "" (empty string) when the object has no defined values.
  */
 export function buildQuery(
   params: Record<string, string | number | boolean | null | undefined>
@@ -81,15 +89,22 @@ export function buildQuery(
 // ---------------------------------------------------------------------------
 
 function getBaseUrl(): string {
-  const url = process.env.NEXT_PUBLIC_BACKEND_URL;
+  // NEXT_PUBLIC_API_URL is the canonical variable.
+  // Fall back to NEXT_PUBLIC_BACKEND_URL for backward compatibility
+  // with existing .env.local files that use the old name.
+  const url =
+    process.env.NEXT_PUBLIC_API_URL ??
+    process.env.NEXT_PUBLIC_BACKEND_URL;
+
   if (!url) {
     if (process.env.NODE_ENV !== "production") {
       console.warn(
-        "[api-client] NEXT_PUBLIC_BACKEND_URL is not set. " +
-          "API requests will be made to a relative path."
+        "[api-client] NEXT_PUBLIC_API_URL is not set. " +
+          "Defaulting to http://localhost:8000. " +
+          "Set NEXT_PUBLIC_API_URL in frontend/.env.local."
       );
     }
-    return "";
+    return "http://localhost:8000";
   }
   // Strip a trailing slash so callers can always prefix paths with "/".
   return url.endsWith("/") ? url.slice(0, -1) : url;
@@ -101,7 +116,6 @@ function buildHeaders(options?: RequestOptions): HeadersInit {
     Accept: "application/json",
   };
 
-  // Accept a raw token string — never double-prefix.
   if (options?.token) {
     const raw = options.token.startsWith("Bearer ")
       ? options.token
@@ -116,10 +130,7 @@ function buildHeaders(options?: RequestOptions): HeadersInit {
   return headers;
 }
 
-/**
- * Parse the response body.
- * Returns `null` for 204 No Content or any empty body.
- */
+/** Parse the response body. Returns null for 204 or non-JSON responses. */
 async function parseBody<T>(response: Response): Promise<T | null> {
   const contentType = response.headers.get("Content-Type") ?? "";
   if (
@@ -130,21 +141,22 @@ async function parseBody<T>(response: Response): Promise<T | null> {
   }
 
   const text = await response.text();
-  if (!text.trim()) {
-    return null;
-  }
+  if (!text.trim()) return null;
 
   try {
     return JSON.parse(text) as T;
   } catch {
-    throw new ApiError(response.status, `Invalid JSON response: ${text.slice(0, 120)}`);
+    throw new ApiError(
+      response.status,
+      `Invalid JSON response: ${text.slice(0, 120)}`
+    );
   }
 }
 
 /**
- * Normalise the FastAPI `detail` field, which can be either:
- *   - a string   e.g. "Subscription is already active"
- *   - an array   e.g. [{ type, loc, msg }]  (Pydantic validation errors)
+ * Normalise the FastAPI `detail` field:
+ *   - Shape A (422 field errors): array of { msg, loc }
+ *   - Shape B (business rule): plain string
  */
 function parseDetail(
   detail: string | Array<{ msg?: string; message?: string }> | undefined
@@ -157,12 +169,17 @@ function parseDetail(
   return undefined;
 }
 
+// ---------------------------------------------------------------------------
+// Core fetch + 401-refresh logic
+// ---------------------------------------------------------------------------
+
 /**
- * Execute a fetch request and normalise errors into `ApiError`.
+ * Execute a fetch request and normalise errors into ApiError.
  *
- * Special status codes:
- *   409 — conflict (e.g. duplicate, invalid state transition)
- *   503 — auth service unavailable (Supabase not configured on server)
+ * On 401: refresh the Supabase session once and retry with the new token.
+ * If the retry also fails with 401/403, sign the user out and redirect to /login.
+ *
+ * Important: 401 and 403 are NEVER silently swallowed — they always throw.
  */
 async function request<T>(
   method: string,
@@ -182,19 +199,49 @@ async function request<T>(
       signal: options?.signal,
     });
   } catch (err) {
-    // Network error (DNS failure, connection refused, CORS pre-flight blocked…)
     const message =
       err instanceof Error ? err.message : "Network request failed";
     throw new ApiError(0, message);
   }
 
+  // ── 401: token expired — attempt one refresh + retry ────────────────────
+  if (response.status === 401 && !options?._isRetry) {
+    const { refreshSupabaseSession, supabase } = await import("@/lib/supabase-token").then(
+      async (mod) => ({
+        refreshSupabaseSession: mod.refreshSupabaseSession,
+        supabase: (await import("@/lib/supabase")).supabase,
+      })
+    );
+
+    const newSession = await refreshSupabaseSession();
+
+    if (newSession?.access_token) {
+      // Retry exactly once with the fresh token.
+      return request<T>(method, path, body, {
+        ...options,
+        token: newSession.access_token,
+        _isRetry: true,
+      });
+    }
+
+    // Refresh failed — sign out and redirect to login.
+    if (typeof window !== "undefined") {
+      await supabase.auth.signOut();
+      window.location.replace("/login");
+    }
+    throw new ApiError(401, "Session expired. Please sign in again.");
+  }
+
   if (!response.ok) {
     // Special-case human-readable messages for well-known codes.
     if (response.status === 503) {
-      throw new ApiError(503, "Authentication service is unavailable. Check server configuration.");
+      throw new ApiError(
+        503,
+        "Authentication service is unavailable. Check server configuration."
+      );
     }
 
-    // Attempt to read a server-supplied error message from the body.
+    // Read server-supplied error message.
     let serverMessage: string | undefined;
     try {
       const errorBody = await parseBody<{
@@ -202,15 +249,29 @@ async function request<T>(
         detail?: string | Array<{ msg?: string; message?: string }>;
       }>(response);
       serverMessage =
-        errorBody?.message ??
-        parseDetail(errorBody?.detail) ??
-        undefined;
+        errorBody?.message ?? parseDetail(errorBody?.detail) ?? undefined;
     } catch {
       // Ignore parse failures on error responses.
     }
 
+    if (response.status === 401) {
+      // _isRetry was true — the retry also got 401.
+      throw new ApiError(401, serverMessage ?? "Unauthorized. Please sign in.");
+    }
+
+    if (response.status === 403) {
+      throw new ApiError(
+        403,
+        serverMessage ?? "You do not have permission to perform this action."
+      );
+    }
+
     if (response.status === 409) {
-      throw new ApiError(409, serverMessage ?? "Conflict — the action cannot be completed in the current state.");
+      throw new ApiError(
+        409,
+        serverMessage ??
+          "Conflict — the action cannot be completed in the current state."
+      );
     }
 
     throw new ApiError(

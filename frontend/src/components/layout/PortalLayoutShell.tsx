@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard,
   CreditCard,
@@ -16,6 +16,7 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "cn";
+import { supabase } from "@/lib/supabase";
 
 // ---------------------------------------------------------------------------
 // Portal navigation items — customer-facing only, no admin routes
@@ -47,6 +48,12 @@ function SidebarContent({
   isMobile,
 }: SidebarContentProps) {
   const pathname = usePathname();
+  const router = useRouter();
+
+  async function handleLogout() {
+    await supabase.auth.signOut();
+    router.replace("/login");
+  }
 
   return (
     <div
@@ -126,9 +133,10 @@ function SidebarContent({
         })}
       </nav>
 
-      {/* Logout placeholder */}
+      {/* Logout */}
       <div className="shrink-0 border-t border-sidebar-border px-2 py-3">
         <button
+          onClick={handleLogout}
           className={cn(
             "flex w-full items-center gap-3 rounded-md px-2 py-2 text-sm font-medium text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors",
             collapsed && !isMobile && "justify-center px-0"

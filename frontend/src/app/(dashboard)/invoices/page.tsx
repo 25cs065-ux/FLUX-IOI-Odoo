@@ -218,7 +218,7 @@ export default function InvoicesPage() {
   const fetchInvoices = useCallback(async () => {
     setLoading(true);
     try {
-      const token = getSupabaseToken();
+      const token = await getSupabaseToken();
       const qs = buildQuery({ status: statusFilter === "all" ? undefined : statusFilter, limit: 100 });
       const { data } = await apiClient.get<ApiInvoice[]>(
         `/invoices${qs}`,
@@ -275,7 +275,7 @@ export default function InvoicesPage() {
     const cfg = ACTION_CONFIG[kind];
     if (!usingMock && cfg.endpoint) {
       try {
-        const token = getSupabaseToken();
+        const token = await getSupabaseToken();
         await apiClient.post(
           `/invoices/${id}/${cfg.endpoint}`,
           {},

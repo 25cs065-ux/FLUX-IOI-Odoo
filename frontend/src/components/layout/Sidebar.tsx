@@ -1,10 +1,11 @@
 "use client";
 
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
 import { LogOut, ChevronLeft, ChevronRight, Menu, X } from "lucide-react";
 import { cn } from "cn";
 import { NAV_ITEMS } from "@/lib/navigation";
+import { supabase } from "@/lib/supabase";
 
 interface SidebarProps {
   collapsed: boolean;
@@ -20,6 +21,12 @@ export function Sidebar({
   onMobileClose,
 }: SidebarProps) {
   const pathname = usePathname();
+  const router = useRouter();
+
+  async function handleLogout() {
+    await supabase.auth.signOut();
+    router.replace("/login");
+  }
 
   const sidebarContent = (
     <div
@@ -95,6 +102,7 @@ export function Sidebar({
       {/* Logout */}
       <div className="shrink-0 border-t border-sidebar-border px-2 py-3">
         <button
+          onClick={handleLogout}
           className={cn(
             "flex w-full items-center gap-3 rounded-md px-2 py-2 text-sm font-medium text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors",
             collapsed && "justify-center px-0"

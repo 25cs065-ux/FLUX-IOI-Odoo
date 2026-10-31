@@ -133,7 +133,7 @@ export default function PortalInvoicesPage() {
   useEffect(() => {
     async function load() {
       try {
-        const token = getSupabaseToken();
+        const token = await getSupabaseToken();
         const { data } = await apiClient.get<ApiInvoice[]>(
           "/invoices?limit=100",
           token ? { token } : undefined

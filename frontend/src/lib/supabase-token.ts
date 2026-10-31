@@ -1,68 +1,54 @@
 // ---------------------------------------------------------------------------
-// Supabase token accessor (no SDK required)
+// Supabase token accessor
 //
-// Supabase stores its session in localStorage under the key:
-//   sb-<project-ref>-auth-token
+// Replaces the original localStorage-scanning workaround with the official
+// Supabase SDK session API.
 //
-// Since @supabase/supabase-js is not installed in this project, this module
-// reads the token directly from localStorage by scanning for the well-known
-// key prefix. Falls back to null if the token is missing or expired.
+// Design rules:
+//   - getSupabaseToken()  — returns the current access token string, or null.
+//     Calls refreshSession() automatically when the SDK deems it necessary
+//     (autoRefreshToken is enabled on the client, so this is mainly a fallback).
+//   - getSupabaseSession() — returns the full Session object.
 //
-// Usage:
-//   import { getSupabaseToken } from "@/lib/supabase-token";
-//   const token = getSupabaseToken();  // string | null
-//   if (token) {
-//     await apiClient.get("/subscriptions", { token });
-//   }
+// The 401-retry logic (refresh → retry → sign-out) lives in api-client.ts
+// rather than here so this module stays a pure token accessor.
 // ---------------------------------------------------------------------------
 
-const SUPABASE_KEY_PREFIX = "sb-";
-const SUPABASE_KEY_SUFFIX = "-auth-token";
+import { supabase } from "@/lib/supabase";
+import type { Session } from "@supabase/supabase-js";
 
-interface SupabaseStoredSession {
-  access_token?: string;
-  expires_at?: number; // unix timestamp (seconds)
+/**
+ * Return the current Supabase access token, or null when the user is not
+ * signed in.
+ *
+ * On the server (SSR) this always returns null because localStorage is not
+ * available — use server-side session helpers if you need SSR auth.
+ */
+export async function getSupabaseToken(): Promise<string | null> {
+  const session = await getSupabaseSession();
+  return session?.access_token ?? null;
 }
 
 /**
- * Read the Supabase access token from localStorage without the SDK.
- *
- * Returns the raw access_token string if a valid, non-expired session is
- * found, otherwise returns null.
- *
- * Safe to call in a browser environment; returns null on the server (SSR).
+ * Return the full Supabase Session object, or null when not signed in.
+ * The SDK handles token refresh automatically when autoRefreshToken is true.
  */
-export function getSupabaseToken(): string | null {
+export async function getSupabaseSession(): Promise<Session | null> {
   if (typeof window === "undefined") return null;
 
-  try {
-    const storage = window.localStorage;
-    for (let i = 0; i < storage.length; i++) {
-      const key = storage.key(i);
-      if (!key) continue;
-      if (key.startsWith(SUPABASE_KEY_PREFIX) && key.endsWith(SUPABASE_KEY_SUFFIX)) {
-        const raw = storage.getItem(key);
-        if (!raw) continue;
+  const { data, error } = await supabase.auth.getSession();
+  if (error || !data.session) return null;
+  return data.session;
+}
 
-        const session = JSON.parse(raw) as SupabaseStoredSession;
-        const token = session?.access_token;
-        if (!token) continue;
+/**
+ * Attempt to refresh the current session.
+ * Returns the new Session, or null if refresh fails (user must re-login).
+ */
+export async function refreshSupabaseSession(): Promise<Session | null> {
+  if (typeof window === "undefined") return null;
 
-        // Check expiry — give a 30-second grace window.
-        if (session.expires_at) {
-          const nowSeconds = Math.floor(Date.now() / 1000);
-          if (nowSeconds >= session.expires_at - 30) {
-            // Token expired or about to expire — do not return it.
-            continue;
-          }
-        }
-
-        return token;
-      }
-    }
-  } catch {
-    // localStorage may be unavailable (e.g. private browsing, SSR).
-  }
-
-  return null;
+  const { data, error } = await supabase.auth.refreshSession();
+  if (error || !data.session) return null;
+  return data.session;
 }
