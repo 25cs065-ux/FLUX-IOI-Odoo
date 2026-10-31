@@ -34,9 +34,9 @@ class SubscriptionRepository(Protocol):
                            plan_id: Optional[UUID], limit: int, offset: int) -> list[dict]: ...
     def get_subscription(self, subscription_id: UUID) -> Optional[dict]: ...
     def insert_subscription(self, data: dict) -> dict: ...
-    def update_subscription(self, subscription_id: UUID, data: dict,
-                            expected_status: Optional[str] = None) -> Optional[dict]:
-        """Returns None if the row is missing or no longer has expected_status."""
+    def update_subscription(self, subscription_id: UUID, data: dict, expected_status: Optional[str] = None,
+                            expected_updated_at: Optional[str] = None) -> Optional[dict]:
+        """Returns None if the row is missing or no longer matches the expected values."""
         ...
     def delete_subscription(self, subscription_id: UUID) -> None: ...
 
@@ -44,6 +44,9 @@ class SubscriptionRepository(Protocol):
     def list_lines(self, subscription_id: UUID) -> list[dict]: ...
     def insert_lines(self, lines: list[dict]) -> list[dict]: ...
     def delete_lines(self, subscription_id: UUID) -> None: ...
+    def delete_lines_by_ids(self, line_ids: list) -> None:
+        """One DELETE statement, so it removes all of them or none."""
+        ...
     def insert_history(self, entry: dict) -> dict: ...
     def list_history(self, subscription_id: UUID) -> list[dict]: ...
 
@@ -97,11 +100,14 @@ class SupabaseSubscriptionRepository:
     def insert_subscription(self, data):
         return self.db.table("subscriptions").insert(to_row(data)).execute().data[0]
 
-    def update_subscription(self, subscription_id, data, expected_status=None):
+    def update_subscription(self, subscription_id, data, expected_status=None, expected_updated_at=None):
         query = self.db.table("subscriptions").update(to_row(data)).eq("id", str(subscription_id))
         if expected_status:
             # Guards lifecycle changes against concurrent updates.
             query = query.eq("status", expected_status)
+        if expected_updated_at:
+            # Optimistic lock for edits: fails if anyone saved since we read.
+            query = query.eq("updated_at", str(expected_updated_at))
         res = query.execute()
         return res.data[0] if res.data else None
 
@@ -120,6 +126,10 @@ class SupabaseSubscriptionRepository:
 
     def delete_lines(self, subscription_id):
         self.db.table("subscription_lines").delete().eq("subscription_id", str(subscription_id)).execute()
+
+    def delete_lines_by_ids(self, line_ids):
+        if line_ids:
+            self.db.table("subscription_lines").delete().in_("id", [str(i) for i in line_ids]).execute()
 
     def insert_history(self, entry):
         return self.db.table("subscription_status_history").insert(to_row(entry)).execute().data[0]

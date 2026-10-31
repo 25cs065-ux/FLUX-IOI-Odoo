@@ -17,6 +17,7 @@ class FakeSubscriptionRepository:
         self.subscriptions, self.lines, self.history = {}, {}, []
         self._seq = 100
         self.fail_line_insert = False
+        self.fail_line_deletes = 0      # number of upcoming delete_lines_by_ids calls that fail
         self.writes = []            # (table, op, keys) for schema contract tests
 
     def _record(self, table, op, data):
@@ -83,10 +84,12 @@ class FakeSubscriptionRepository:
         self.subscriptions[row["id"]] = row
         return copy.deepcopy(row)
 
-    def update_subscription(self, subscription_id, data, expected_status=None):
+    def update_subscription(self, subscription_id, data, expected_status=None, expected_updated_at=None):
         self._record("subscriptions", "update", data)
         row = self.subscriptions.get(str(subscription_id))
         if not row or (expected_status and row["status"] != expected_status):
+            return None
+        if expected_updated_at and row["updated_at"] != str(expected_updated_at):
             return None
         row.update(to_row(data))
         return copy.deepcopy(row)
@@ -112,6 +115,13 @@ class FakeSubscriptionRepository:
             self.lines[row["id"]] = row
             out.append(copy.deepcopy(row))
         return out
+
+    def delete_lines_by_ids(self, line_ids):
+        if self.fail_line_deletes:
+            self.fail_line_deletes -= 1
+            raise RuntimeError("simulated database failure")
+        ids = {str(i) for i in line_ids}
+        self.lines = {k: v for k, v in self.lines.items() if k not in ids}
 
     def delete_lines(self, subscription_id):
         self.lines = {k: v for k, v in self.lines.items() if v["subscription_id"] != str(subscription_id)}

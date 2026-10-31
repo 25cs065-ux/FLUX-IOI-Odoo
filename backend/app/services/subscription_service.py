@@ -321,13 +321,59 @@ def update_subscription(repo: SubscriptionRepository, subscription_id: UUID,
         changes["next_billing_date"] = _first_billing_date(start, trial)
     changes["updated_at"] = _now()
 
-    updated = repo.update_subscription(subscription_id, changes, expected_status=sub["status"])
-    if not updated:
-        raise ConflictError("Subscription was changed by someone else; reload and try again")
-    if new_lines is not None:
-        repo.delete_lines(subscription_id)
-        repo.insert_lines([{**l, "subscription_id": subscription_id} for l in new_lines])
+    old_line_ids = [l["id"] for l in repo.list_lines(subscription_id)] if new_lines is not None else []
+    updated = save_with_lines(
+        old_line_ids=old_line_ids,
+        insert_lines=(lambda: repo.insert_lines([{**l, "subscription_id": subscription_id} for l in new_lines]))
+        if new_lines is not None else None,
+        delete_lines=repo.delete_lines_by_ids,
+        update_header=lambda: repo.update_subscription(subscription_id, changes, expected_status=sub["status"],
+                                                       expected_updated_at=sub.get("updated_at")),
+        restore_header=lambda saved: repo.update_subscription(
+            subscription_id, {k: sub.get(k) for k in changes}, expected_updated_at=saved["updated_at"]),
+        conflict_message="Subscription was changed by someone else; reload and try again",
+    )
     return {**updated, "lines": repo.list_lines(subscription_id)}
+
+
+def save_with_lines(*, old_line_ids: list, insert_lines, delete_lines, update_header,
+                    restore_header, conflict_message: str) -> dict:
+    """Save a header and replace its lines without a database transaction.
+
+    1. insert the new lines (old ones untouched)
+    2. update the header with an optimistic lock (expected updated_at)
+    3. delete the old lines by id in one statement
+
+    If 2 fails or loses the lock, the new lines are removed and nothing has
+    changed. If 3 fails, the header is restored and the new lines removed.
+    Two concurrent edits can therefore never leave mixed or duplicated lines:
+    the loser of the lock cleans up only its own lines.
+    """
+    new_ids = [row["id"] for row in insert_lines()] if insert_lines else []
+    try:
+        updated = update_header()
+    except Exception:
+        _quietly(delete_lines, new_ids)
+        raise
+    if not updated:
+        _quietly(delete_lines, new_ids)
+        raise ConflictError(conflict_message)
+    if insert_lines:
+        try:
+            delete_lines(old_line_ids)
+        except Exception:
+            _quietly(restore_header, updated)
+            _quietly(delete_lines, new_ids)
+            raise
+    return updated
+
+
+def _quietly(func, *args) -> None:
+    """Best-effort compensation step; the original error is what gets raised."""
+    try:
+        func(*args)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------- lifecycle

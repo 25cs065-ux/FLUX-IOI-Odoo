@@ -29,13 +29,17 @@ class InvoiceRepository(SubscriptionRepository, Protocol):
         """Raises DuplicateInvoiceError on the live-period unique index."""
         ...
     def update_invoice(self, invoice_id: UUID, data: dict, expected_status: Optional[str] = None,
-                       expected_amount_paid=None) -> Optional[dict]:
+                       expected_amount_paid=None, expected_updated_at: Optional[str] = None) -> Optional[dict]:
         """Returns None if the row is missing or no longer matches the expected values."""
         ...
     def delete_invoice(self, invoice_id: UUID) -> None: ...
     def list_invoice_lines(self, invoice_id: UUID) -> list[dict]: ...
     def insert_invoice_lines(self, lines: list[dict]) -> list[dict]: ...
     def delete_invoice_lines(self, invoice_id: UUID) -> None: ...
+    def delete_invoice_lines_by_ids(self, line_ids: list) -> None:
+        """One DELETE statement, so it removes all of them or none."""
+        ...
+    def list_invoice_payments(self, invoice_id: UUID) -> list[dict]: ...
     def list_billable_subscriptions(self, as_of: date) -> list[dict]:
         """Active subscriptions with next_billing_date <= as_of."""
         ...
@@ -80,13 +84,17 @@ class SupabaseInvoiceRepository(SupabaseSubscriptionRepository):
                 raise DuplicateInvoiceError(exc.message) from exc
             raise
 
-    def update_invoice(self, invoice_id, data, expected_status=None, expected_amount_paid=None):
+    def update_invoice(self, invoice_id, data, expected_status=None, expected_amount_paid=None,
+                       expected_updated_at=None):
         query = self.db.table("invoices").update(to_row(data)).eq("id", str(invoice_id))
         if expected_status:
             query = query.eq("status", expected_status)
         if expected_amount_paid is not None:
             # Guards balance updates against concurrent payments.
             query = query.eq("amount_paid", str(expected_amount_paid))
+        if expected_updated_at:
+            # Optimistic lock for edits: fails if anyone saved since we read.
+            query = query.eq("updated_at", str(expected_updated_at))
         res = query.execute()
         return res.data[0] if res.data else None
 
@@ -105,6 +113,15 @@ class SupabaseInvoiceRepository(SupabaseSubscriptionRepository):
 
     def delete_invoice_lines(self, invoice_id):
         self.db.table("invoice_lines").delete().eq("invoice_id", str(invoice_id)).execute()
+
+    def delete_invoice_lines_by_ids(self, line_ids):
+        if line_ids:
+            self.db.table("invoice_lines").delete().in_("id", [str(i) for i in line_ids]).execute()
+
+    def list_invoice_payments(self, invoice_id):
+        res = (self.db.table("payments").select("*").eq("invoice_id", str(invoice_id))
+               .order("created_at").execute())
+        return res.data or []
 
     def list_billable_subscriptions(self, as_of):
         res = (self.db.table("subscriptions").select("*").eq("status", "active")

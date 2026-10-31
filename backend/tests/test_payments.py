@@ -388,3 +388,50 @@ def test_payment_flows_write_only_real_columns(client, repo):
     repo.fail_invoice_update = False
     assert {t for t, _, _ in repo.writes} >= {"payments", "invoices"}
     assert_writes_match_schema(repo.writes)
+
+
+# ---------------------------------------------------------------- void vs payment
+
+def test_void_blocked_by_pending_payment(client, repo):
+    inv = issued_invoice(client, repo)
+    pending = pay(client, inv["id"], "10", status="pending").json()["payment"]
+    assert client.post(f"/invoices/{inv['id']}/void").status_code == 409
+    client.post(f"/payments/{pending['id']}/fail")
+    assert client.post(f"/invoices/{inv['id']}/void").json()["status"] == "void"
+
+
+def test_payment_landing_during_void_undoes_the_void(client, repo):
+    inv = issued_invoice(client, repo)
+    original = repo.update_invoice
+
+    def payment_lands_mid_void(invoice_id, data, *args, **kwargs):
+        result = original(invoice_id, data, *args, **kwargs)
+        if data.get("status") == "void":
+            repo.payments[new_id()] = {
+                "id": new_id(), "payment_reference": "RACE", "invoice_id": inv["id"],
+                "customer_id": repo.customer["id"], "status": "completed", "amount": "40.00",
+                "refunded_amount": "0.00", "gateway": None, "gateway_payment_id": None,
+                "created_at": "1", "notes": None,
+            }
+        return result
+
+    repo.update_invoice = payment_lands_mid_void
+    res = client.post(f"/invoices/{inv['id']}/void")
+    assert res.status_code == 409 and "not voided" in res.json()["detail"]
+    after = invoice(client, inv["id"])
+    assert after["status"] == "sent" and after["voided_at"] is None
+
+
+def test_void_landing_during_payment_fails_the_payment(client, repo):
+    inv = issued_invoice(client, repo)
+
+    def void_lands_mid_payment():
+        repo.invoices[inv["id"]]["status"] = "void"
+
+    repo.after_payment_insert = void_lands_mid_payment
+    res = pay(client, inv["id"], "40")
+    assert res.status_code == 409 and "voided or cancelled" in res.json()["detail"]
+    [payment] = repo.payments.values()
+    assert payment["status"] == "failed"
+    after = invoice(client, inv["id"])
+    assert after["status"] == "void" and Decimal(after["amount_paid"]) == 0

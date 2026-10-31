@@ -14,6 +14,7 @@ class FakeInvoiceRepository(FakeSubscriptionRepository):
         self.invoices, self.invoice_lines = {}, {}
         self._inv_seq = 1000
         self.fail_invoice_line_insert = False
+        self.payments = {}
 
     @staticmethod
     def _with_amount_due(row):
@@ -42,12 +43,13 @@ class FakeInvoiceRepository(FakeSubscriptionRepository):
 
     def insert_invoice(self, data):
         self._record("invoices", "insert", data)
+        now = datetime.now(timezone.utc).isoformat()
         row = {
             "id": new_id(), "invoice_number": f"INV-{self._inv_seq:06d}", "subscription_id": None,
             "payment_terms_id": None, "discount_id": None, "billing_period_start": None,
             "billing_period_end": None, "amount_paid": "0.00", "tax_name": None, "tax_rate": None,
             "notes": None, "terms_and_conditions": None, "sent_at": None, "paid_at": None,
-            "voided_at": None, "created_at": datetime.now(timezone.utc).isoformat(), "updated_at": None,
+            "voided_at": None, "created_at": now, "updated_at": now,     # DB default NOW()
             **to_row(data),
         }
         if row["subscription_id"] and row["billing_period_start"] and \
@@ -59,12 +61,15 @@ class FakeInvoiceRepository(FakeSubscriptionRepository):
         self.invoices[row["id"]] = self._with_amount_due(row)
         return copy.deepcopy(row)
 
-    def update_invoice(self, invoice_id, data, expected_status=None, expected_amount_paid=None):
+    def update_invoice(self, invoice_id, data, expected_status=None, expected_amount_paid=None,
+                       expected_updated_at=None):
         self._record("invoices", "update", data)
         row = self.invoices.get(str(invoice_id))
         if not row or (expected_status and row["status"] != expected_status):
             return None
         if expected_amount_paid is not None and                 Decimal(str(row["amount_paid"])) != Decimal(str(expected_amount_paid)):
+            return None
+        if expected_updated_at and row["updated_at"] != str(expected_updated_at):
             return None
         row.update(to_row(data))
         return copy.deepcopy(self._with_amount_due(row))
@@ -87,6 +92,14 @@ class FakeInvoiceRepository(FakeSubscriptionRepository):
             self.invoice_lines[row["id"]] = row
             out.append(copy.deepcopy(row))
         return out
+
+    def delete_invoice_lines_by_ids(self, line_ids):
+        ids = {str(i) for i in line_ids}
+        self.invoice_lines = {k: v for k, v in self.invoice_lines.items() if k not in ids}
+
+    def list_invoice_payments(self, invoice_id):
+        rows = [p for p in self.payments.values() if p["invoice_id"] == str(invoice_id)]
+        return copy.deepcopy(sorted(rows, key=lambda p: p["created_at"]))
 
     def delete_invoice_lines(self, invoice_id):
         self.invoice_lines = {k: v for k, v in self.invoice_lines.items()

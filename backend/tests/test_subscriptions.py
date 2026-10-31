@@ -367,3 +367,66 @@ def test_openapi_documents_all_endpoints():
         assert f"/subscriptions/{{subscription_id}}/{action}" in paths
     assert {"get", "post"} <= set(paths["/subscriptions"])
     assert {"get", "patch"} <= set(paths["/subscriptions/{subscription_id}"])
+
+
+# ---------------------------------------------------------------- edit safety without transactions
+
+def line_descriptions(repo, sub_id):
+    return [l["description"] for l in repo.list_lines(sub_id)]
+
+
+def test_concurrent_edit_loses_optimistic_lock_and_cleans_up(client, repo):
+    sub = create(client, repo).json()
+    original_insert = repo.insert_lines
+
+    def someone_saves_first(lines):
+        rows = original_insert(lines)
+        repo.subscriptions[sub["id"]]["updated_at"] = "2099-01-01T00:00:00+00:00"   # another edit landed
+        return rows
+
+    repo.insert_lines = someone_saves_first
+    res = client.patch(f"/subscriptions/{sub['id']}", json={"lines": [{"description": "Mine", "unit_price": "1"}]})
+    assert res.status_code == 409
+    assert line_descriptions(repo, sub["id"]) == ["Pro Monthly"]          # our new line removed again
+    assert Decimal(repo.get_subscription(sub["id"])["total_amount"]) == Decimal("200")
+
+
+def test_stale_edit_without_lines_is_rejected(client, repo):
+    sub = create(client, repo).json()
+    original = repo.get_subscription
+    repo.get_subscription = lambda sid: {**original(sid), "updated_at": "2000-01-01T00:00:00+00:00"}
+    assert client.patch(f"/subscriptions/{sub['id']}", json={"notes": "late"}).status_code == 409
+    repo.get_subscription = original
+    assert repo.get_subscription(sub["id"])["notes"] is None
+
+
+def test_failed_old_line_delete_restores_header_and_lines(client, repo):
+    sub = create(client, repo).json()
+    repo.fail_line_deletes = 1
+    with pytest.raises(RuntimeError):
+        client.patch(f"/subscriptions/{sub['id']}",
+                     json={"lines": [{"description": "New", "unit_price": "999"}], "notes": "edited"})
+    after = repo.get_subscription(sub["id"])
+    assert line_descriptions(repo, sub["id"]) == ["Pro Monthly"]
+    assert Decimal(after["total_amount"]) == Decimal("200") and after["notes"] is None
+
+
+def test_failed_header_update_removes_new_lines(client, repo):
+    sub = create(client, repo).json()
+
+    def broken_update(*args, **kwargs):
+        raise RuntimeError("connection reset")
+
+    repo.update_subscription = broken_update
+    with pytest.raises(RuntimeError):
+        client.patch(f"/subscriptions/{sub['id']}", json={"lines": [{"description": "New", "unit_price": "5"}]})
+    assert line_descriptions(repo, sub["id"]) == ["Pro Monthly"]
+
+
+def test_successful_line_replacement_leaves_only_new_lines(client, repo):
+    sub = create(client, repo).json()
+    res = client.patch(f"/subscriptions/{sub['id']}", json={"lines": [
+        {"description": "A", "unit_price": "1"}, {"description": "B", "unit_price": "2"}]})
+    assert res.status_code == 200
+    assert line_descriptions(repo, sub["id"]) == ["A", "B"]
+    assert len(repo.lines) == 2

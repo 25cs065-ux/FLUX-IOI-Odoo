@@ -7,6 +7,11 @@ Consistency model
   it is safe, so a failure after a payment write is repaired by compensating
   the payment and re-syncing (or by POST /payments/recalculate/{invoice_id}).
 
+Void vs payment
+  record_payment re-reads the invoice status after inserting the payment;
+  void_invoice re-reads the payments after writing the void. Whichever runs
+  second sees the other and backs out (payment marked failed / void undone).
+
 Duplicates and overpayment
   * payment_reference is an idempotency key: replaying the same request
     returns the original payment instead of recording a second one.
@@ -201,6 +206,11 @@ def record_payment(repo: PaymentRepository, payload: PaymentCreate, user: Curren
         return _replay(repo, existing, payload, "payment_reference"), False
 
     try:
+        # Re-check after inserting: void_invoice does the mirror-image check,
+        # so a concurrent void and payment can never both succeed.
+        current = repo.get_invoice(inv["id"])
+        if not current or current["status"] not in PAYABLE_INVOICE_STATUSES:
+            raise ConflictError("The invoice was voided or cancelled while this payment was being recorded")
         others = [p for p in repo.list_invoice_payments(inv["id"]) if str(p["id"]) != str(payment["id"])]
         if payload.amount > total - net_paid(others) - pending_total(others):
             raise ConflictError("Another payment was recorded at the same time; "

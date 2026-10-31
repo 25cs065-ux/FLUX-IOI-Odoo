@@ -506,3 +506,18 @@ def test_invoice_flows_write_only_real_columns(client, repo):
     client.post(f"/invoices/{inv['id']}/void")
     assert {t for t, _, _ in repo.writes} >= {"invoices", "invoice_lines", "subscriptions"}
     assert_writes_match_schema(repo.writes)
+
+
+def test_concurrent_invoice_edit_is_rejected_and_cleaned_up(client, repo):
+    inv = manual(client, repo).json()
+    original_insert = repo.insert_invoice_lines
+
+    def someone_saves_first(lines):
+        rows = original_insert(lines)
+        repo.invoices[inv["id"]]["updated_at"] = "2099-01-01T00:00:00+00:00"
+        return rows
+
+    repo.insert_invoice_lines = someone_saves_first
+    res = client.patch(f"/invoices/{inv['id']}", json={"lines": [{"description": "Mine", "unit_price": "1"}]})
+    assert res.status_code == 409
+    assert [l["description"] for l in repo.list_invoice_lines(inv["id"])] == ["Seat"]

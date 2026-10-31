@@ -18,7 +18,6 @@ class PaymentRepository(InvoiceRepository, Protocol):
     def get_payment(self, payment_id: UUID) -> Optional[dict]: ...
     def get_payment_by_reference(self, reference: str) -> Optional[dict]: ...
     def find_gateway_payment(self, gateway: Optional[str], gateway_payment_id: str) -> Optional[dict]: ...
-    def list_invoice_payments(self, invoice_id: UUID) -> list[dict]: ...
     def insert_payment(self, data: dict) -> dict:
         """Raises DuplicatePaymentError when payment_reference already exists."""
         ...
@@ -51,11 +50,6 @@ class SupabasePaymentRepository(SupabaseInvoiceRepository):
         query = query.eq("gateway", gateway) if gateway else query.is_("gateway", "null")
         res = query.limit(1).execute()
         return res.data[0] if res.data else None
-
-    def list_invoice_payments(self, invoice_id):
-        res = (self.db.table("payments").select("*").eq("invoice_id", str(invoice_id))
-               .order("created_at").execute())
-        return res.data or []
 
     def insert_payment(self, data):
         from postgrest.exceptions import APIError

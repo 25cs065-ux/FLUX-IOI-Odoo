@@ -12,14 +12,15 @@ from subscription_fakes import new_id
 class FakePaymentRepository(FakeInvoiceRepository):
     def __init__(self):
         super().__init__()
-        self.payments = {}
         self.fail_invoice_update = False    # simulate a DB failure while updating the balance
         self.after_payment_insert = None    # hook to simulate a concurrent request
 
-    def update_invoice(self, invoice_id, data, expected_status=None, expected_amount_paid=None):
+    def update_invoice(self, invoice_id, data, expected_status=None, expected_amount_paid=None,
+                       expected_updated_at=None):
         if self.fail_invoice_update:
             raise RuntimeError("simulated database failure")
-        return super().update_invoice(invoice_id, data, expected_status, expected_amount_paid)
+        return super().update_invoice(invoice_id, data, expected_status, expected_amount_paid,
+                                      expected_updated_at)
 
     def list_payments(self, *, status, invoice_id, customer_id, limit, offset):
         rows = [p for p in self.payments.values()
@@ -39,10 +40,6 @@ class FakePaymentRepository(FakeInvoiceRepository):
     def find_gateway_payment(self, gateway, gateway_payment_id):
         return next((copy.deepcopy(p) for p in self.payments.values()
                      if p["gateway_payment_id"] == gateway_payment_id and p["gateway"] == gateway), None)
-
-    def list_invoice_payments(self, invoice_id):
-        rows = [p for p in self.payments.values() if p["invoice_id"] == str(invoice_id)]
-        return copy.deepcopy(sorted(rows, key=lambda p: p["created_at"]))
 
     def insert_payment(self, data):
         self._record("payments", "insert", data)

@@ -17,6 +17,7 @@ from uuid import UUID
 from app.core.current_user import CurrentUser, Role
 from app.repositories.invoice_repository import DuplicateInvoiceError, InvoiceRepository
 from app.schemas.invoice import InvoiceCreate, InvoiceStatus as I, InvoiceUpdate
+from app.schemas.payment import PaymentStatus as P
 from app.services.subscription_service import (
     ConflictError,
     NotFoundError,
@@ -30,6 +31,7 @@ from app.services.subscription_service import (
     build_lines,
     own_customer_id,
     price_line,
+    save_with_lines,
 )
 from app.services.tax_engine import money
 
@@ -334,23 +336,29 @@ def update_invoice(repo: InvoiceRepository, invoice_id: UUID, payload: InvoiceUp
         changes.update(invoice_totals(new_lines))
     changes["updated_at"] = _now()
 
-    updated = repo.update_invoice(invoice_id, changes, expected_status=inv["status"])
-    if not updated:
-        raise ConflictError("Invoice was changed by someone else; reload and try again")
-    if new_lines is not None:
-        repo.delete_invoice_lines(invoice_id)
-        repo.insert_invoice_lines([{**l, "invoice_id": invoice_id} for l in new_lines])
+    updated = save_with_lines(
+        old_line_ids=[l["id"] for l in repo.list_invoice_lines(invoice_id)] if new_lines is not None else [],
+        insert_lines=(lambda: repo.insert_invoice_lines([{**l, "invoice_id": invoice_id} for l in new_lines]))
+        if new_lines is not None else None,
+        delete_lines=repo.delete_invoice_lines_by_ids,
+        update_header=lambda: repo.update_invoice(invoice_id, changes, expected_status=inv["status"],
+                                                  expected_updated_at=inv.get("updated_at")),
+        restore_header=lambda saved: repo.update_invoice(
+            invoice_id, {k: inv.get(k) for k in changes}, expected_updated_at=saved["updated_at"]),
+        conflict_message="Invoice was changed by someone else; reload and try again",
+    )
     return {**updated, "lines": repo.list_invoice_lines(invoice_id)}
 
 
 # ---------------------------------------------------------------- status changes
 
-def _set_status(repo, inv: dict, to_status: I, allowed_from: set, fields: Optional[dict] = None) -> dict:
+def _set_status(repo, inv: dict, to_status: I, allowed_from: set, fields: Optional[dict] = None,
+                expected_amount_paid=None) -> dict:
     if inv["status"] not in {s.value for s in allowed_from}:
         allowed = ", ".join(sorted(s.value for s in allowed_from))
         raise ConflictError(f"Cannot move a {inv['status']} invoice to {to_status.value} (allowed from: {allowed})")
     updated = repo.update_invoice(inv["id"], {"status": to_status.value, "updated_at": _now(), **(fields or {})},
-                                  expected_status=inv["status"])
+                                  expected_status=inv["status"], expected_amount_paid=expected_amount_paid)
     if not updated:
         raise ConflictError("Invoice was changed by someone else; reload and try again")
     return updated
@@ -387,11 +395,28 @@ def cancel_invoice(repo, invoice_id, user) -> dict:
     return updated
 
 
+def _live_payments(repo: InvoiceRepository, invoice_id) -> list[dict]:
+    """Pending payments, and completed ones not fully refunded."""
+    return [p for p in repo.list_invoice_payments(invoice_id)
+            if p["status"] == P.PENDING.value
+            or (p["status"] in (P.COMPLETED.value, P.PARTIALLY_REFUNDED.value)
+                and _dec(p["amount"]) > _dec(p.get("refunded_amount") or 0))]
+
+
 def void_invoice(repo, invoice_id, user) -> dict:
+    """Payment recording re-reads the invoice status after inserting, and void
+    re-reads the payments after writing; whichever runs second backs out, so a
+    payment can never end up on a void invoice."""
     inv = get_invoice(repo, invoice_id, user)
-    if inv["status"] in (I.SENT.value, I.OVERDUE.value) and _dec(inv.get("amount_paid") or 0) > 0:
-        raise ConflictError("Invoice has payments recorded; refund them before voiding")
-    updated = _set_status(repo, inv, I.VOID, {I.SENT, I.OVERDUE}, {"voided_at": _now()})
+    if inv["status"] in (I.SENT.value, I.OVERDUE.value) and (
+            _dec(inv.get("amount_paid") or 0) > 0 or _live_payments(repo, inv["id"])):
+        raise ConflictError("Invoice has payments recorded or pending; refund or fail them before voiding")
+    updated = _set_status(repo, inv, I.VOID, {I.SENT, I.OVERDUE}, {"voided_at": _now()},
+                          expected_amount_paid=Decimal("0"))
+    if _live_payments(repo, inv["id"]):
+        repo.update_invoice(inv["id"], {"status": inv["status"], "voided_at": None, "updated_at": _now()},
+                            expected_status=I.VOID.value)
+        raise ConflictError("A payment was recorded while voiding; the invoice was not voided")
     _release_billing_period(repo, inv)
     return updated
 
