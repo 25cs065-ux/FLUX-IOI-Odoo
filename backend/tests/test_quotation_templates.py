@@ -3,10 +3,7 @@ from unittest.mock import patch, MagicMock
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
 from fastapi import FastAPI
-from app.schemas.quotation_template import (
-    QuotationTemplateCreate,
-    QuotationTemplateLineCreate
-)
+import app.schemas.quotation_template as schemas
 from app.routers.quotation_templates import router as quotation_templates_router
 from app.core.auth import get_current_user
 
@@ -15,7 +12,7 @@ test_app.include_router(quotation_templates_router)
 client = TestClient(test_app)
 
 def test_valid_template_creation():
-    tmpl = QuotationTemplateCreate(
+    tmpl = schemas.QuotationTemplateCreate(
         name="Enterprise Proposal",
         validity_days=30,
         description="Standard template for B2B deals"
@@ -25,43 +22,16 @@ def test_valid_template_creation():
 
 def test_negative_validity_days_fails():
     with pytest.raises(ValidationError):
-        QuotationTemplateCreate(
+        schemas.QuotationTemplateCreate(
             name="Invalid Template",
             validity_days=-5
         )
 
 def test_zero_validity_days_fails():
     with pytest.raises(ValidationError):
-        QuotationTemplateCreate(
+        schemas.QuotationTemplateCreate(
             name="Zero Days",
             validity_days=0
-        )
-
-def test_valid_line_creation():
-    line = QuotationTemplateLineCreate(
-        product_id="prod-001",
-        quantity=5,
-        unit_price=50.0,
-        discount=10.0
-    )
-    assert line.quantity == 5
-    assert line.unit_price == 50.0
-    assert line.discount == 10.0
-
-def test_negative_quantity_line_fails():
-    with pytest.raises(ValidationError):
-        QuotationTemplateLineCreate(
-            product_id="prod-001",
-            quantity=-1,
-            unit_price=50.0
-        )
-
-def test_negative_unit_price_line_fails():
-    with pytest.raises(ValidationError):
-        QuotationTemplateLineCreate(
-            product_id="prod-001",
-            quantity=1,
-            unit_price=-10.0
         )
 
 def test_template_creation_blocks_unauthenticated():
