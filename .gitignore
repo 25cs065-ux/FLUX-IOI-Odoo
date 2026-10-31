@@ -7,4 +7,11 @@ __pycache__/
 venv/
 .venv/
 .DS_Store
-.vscode/
+.vscode/.venv/
+backend/.venv/
+__pycache__/
+*/__pycache__/*
+.pytest_cache/
+*.pyc
+.env
+backend/.env
