@@ -6,6 +6,7 @@ from datetime import timedelta
 import pytest
 
 from app.schemas.invoice import InvoiceLineResponse, InvoiceSummary
+from app.schemas.payment import PaymentResponse
 from app.schemas.subscription import (
     StatusHistoryResponse,
     SubscriptionLineResponse,
@@ -44,6 +45,7 @@ def test_subscription_flows_write_only_real_columns(client, repo):
 # ---------------------------------------------------------------- invoices
 
 
-@pytest.mark.parametrize("model,table", [(InvoiceSummary, "invoices"), (InvoiceLineResponse, "invoice_lines")])
-def test_invoice_models_expose_exactly_the_table_columns(model, table):
+@pytest.mark.parametrize("model,table", [(InvoiceSummary, "invoices"), (InvoiceLineResponse, "invoice_lines"),
+                                         (PaymentResponse, "payments")])
+def test_billing_models_expose_exactly_the_table_columns(model, table):
     assert set(model.model_fields) == load_schema()[table].columns

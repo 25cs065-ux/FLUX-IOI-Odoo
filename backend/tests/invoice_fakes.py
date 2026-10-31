@@ -59,10 +59,12 @@ class FakeInvoiceRepository(FakeSubscriptionRepository):
         self.invoices[row["id"]] = self._with_amount_due(row)
         return copy.deepcopy(row)
 
-    def update_invoice(self, invoice_id, data, expected_status=None):
+    def update_invoice(self, invoice_id, data, expected_status=None, expected_amount_paid=None):
         self._record("invoices", "update", data)
         row = self.invoices.get(str(invoice_id))
         if not row or (expected_status and row["status"] != expected_status):
+            return None
+        if expected_amount_paid is not None and                 Decimal(str(row["amount_paid"])) != Decimal(str(expected_amount_paid)):
             return None
         row.update(to_row(data))
         return copy.deepcopy(self._with_amount_due(row))

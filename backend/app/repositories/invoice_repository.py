@@ -28,8 +28,10 @@ class InvoiceRepository(SubscriptionRepository, Protocol):
     def insert_invoice(self, data: dict) -> dict:
         """Raises DuplicateInvoiceError on the live-period unique index."""
         ...
-    def update_invoice(self, invoice_id: UUID, data: dict,
-                       expected_status: Optional[str] = None) -> Optional[dict]: ...
+    def update_invoice(self, invoice_id: UUID, data: dict, expected_status: Optional[str] = None,
+                       expected_amount_paid=None) -> Optional[dict]:
+        """Returns None if the row is missing or no longer matches the expected values."""
+        ...
     def delete_invoice(self, invoice_id: UUID) -> None: ...
     def list_invoice_lines(self, invoice_id: UUID) -> list[dict]: ...
     def insert_invoice_lines(self, lines: list[dict]) -> list[dict]: ...
@@ -78,10 +80,13 @@ class SupabaseInvoiceRepository(SupabaseSubscriptionRepository):
                 raise DuplicateInvoiceError(exc.message) from exc
             raise
 
-    def update_invoice(self, invoice_id, data, expected_status=None):
+    def update_invoice(self, invoice_id, data, expected_status=None, expected_amount_paid=None):
         query = self.db.table("invoices").update(to_row(data)).eq("id", str(invoice_id))
         if expected_status:
             query = query.eq("status", expected_status)
+        if expected_amount_paid is not None:
+            # Guards balance updates against concurrent payments.
+            query = query.eq("amount_paid", str(expected_amount_paid))
         res = query.execute()
         return res.data[0] if res.data else None
 
