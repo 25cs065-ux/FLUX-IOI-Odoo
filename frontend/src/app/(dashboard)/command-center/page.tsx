@@ -30,7 +30,7 @@ import { StatCard } from "@/components/shared/StatCard";
 import { Button } from "@/components/ui/button";
 import { formatDate } from "@/lib/format";
 import { decimalToMinorUnits, formatMinorUnits, multiplyMinorUnits } from "@/lib/money";
-import { apiClient, getAllPages } from "@/lib/api-client";
+import { apiClient, clearApiCache, getAllPages } from "@/lib/api-client";
 import { getSupabaseToken } from "@/lib/supabase-token";
 import type {
   ApiCustomer,
@@ -235,27 +235,19 @@ export default function CommandCenterPage() {
       setLoading(true);
       setError(null);
       const options = token ? { token } : undefined;
-      const [
-        activeSubscriptions,
-        subscriptions,
-        invoices,
-        overdueInvoices,
-        completedPayments,
-        refundedPayments,
-        customers,
-        planResponse,
-      ] = await Promise.all([
-        getAllPages<ApiSubscriptionSummary>("/subscriptions?status=active", 200, options),
+      // One request per list; the status subsets are filtered locally (and the
+      // full lists are shared with other pages through the API client's cache).
+      const [subscriptions, invoices, allPayments, customers, planResponse] = await Promise.all([
         getAllPages<ApiSubscriptionSummary>("/subscriptions", 200, options),
         getAllPages<ApiInvoiceSummary>("/invoices", 200, options),
-        getAllPages<ApiInvoiceSummary>("/invoices?status=overdue", 200, options),
-        getAllPages<ApiPayment>("/payments?status=completed", 200, options),
-        getAllPages<ApiPayment>("/payments?status=partially_refunded", 200, options),
+        getAllPages<ApiPayment>("/payments", 200, options),
         getAllPages<ApiCustomer>("/customers/", 100, options),
         apiClient.get<ApiPlan[]>("/plans/", options),
       ]);
       if (!planResponse.data) throw new Error("The plans endpoint returned no data.");
-      const payments = [...completedPayments, ...refundedPayments];
+      const activeSubscriptions = subscriptions.filter((s) => s.status === "active");
+      const overdueInvoices = invoices.filter((i) => i.status === "overdue");
+      const payments = allPayments.filter((p) => p.status === "completed" || p.status === "partially_refunded");
       setData(calculateDashboard(
         activeSubscriptions,
         subscriptions,
@@ -293,7 +285,7 @@ export default function CommandCenterPage() {
           <h1 className="text-xl font-semibold text-foreground">Command Center</h1>
           <p className="mt-0.5 text-sm text-muted-foreground">Live subscription and revenue overview</p>
         </div>
-        <Button variant="outline" size="sm" onClick={fetchDashboard} disabled={loading}>
+        <Button variant="outline" size="sm" onClick={() => { clearApiCache(); void fetchDashboard(); }} disabled={loading}>
           <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh
         </Button>
       </div>

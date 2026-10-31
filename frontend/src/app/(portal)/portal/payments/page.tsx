@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { DataTable, StatusBadge, type ColumnDef } from "@/components/shared";
 import { formatDate, formatLabel } from "@/lib/format";
 import { decimalToMinorUnits, formatMinorUnits } from "@/lib/money";
-import { apiClient, getAllPages } from "@/lib/api-client";
+import { clearApiCache, getAllPages } from "@/lib/api-client";
 import { getSupabaseToken } from "@/lib/supabase-token";
 import type { ApiInvoiceSummary, ApiPayment, ApiPaymentMethod, PaymentStatus } from "@/types/api";
 
@@ -135,7 +135,7 @@ export default function PortalPaymentsPage() {
       {error && (
         <div className="flex items-center justify-between gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
           <span>{error}</span>
-          <button className="shrink-0 text-xs underline" onClick={() => void fetchPayments()}>
+          <button className="shrink-0 text-xs underline" onClick={() => { clearApiCache(); void fetchPayments(); }}>
             Retry
           </button>
         </div>

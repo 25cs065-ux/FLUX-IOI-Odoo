@@ -97,12 +97,17 @@ export async function proxy(request: NextRequest) {
       },
     });
 
-    const {
-      data: { user },
-      error,
-    } = await supabase.auth.getUser();
-    if (error) throw error;
-    sessionPresent = Boolean(user);
+    // getClaims() refreshes an expired session (updating the cookies above) and
+    // verifies the access token against the project's published signing keys,
+    // which are cached, so navigations and prefetches do not each wait on a
+    // round trip to Supabase Auth the way getUser() does. An invalid or expired
+    // session counts as signed out (redirect to login) instead of an error page.
+    try {
+      const { data, error } = await supabase.auth.getClaims();
+      sessionPresent = !error && Boolean(data?.claims?.sub);
+    } catch {
+      sessionPresent = false;
+    }
   }
 
   function redirectWithAuthCookies(url: URL) {

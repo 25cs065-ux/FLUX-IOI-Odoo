@@ -6,7 +6,7 @@ import { cn } from "cn";
 
 import { DataTable, StatusBadge, StatCard, type ColumnDef } from "@/components/shared";
 import { Button } from "@/components/ui/button";
-import { apiClient, buildQuery } from "@/lib/api-client";
+import { apiClient, buildQuery, clearApiCache } from "@/lib/api-client";
 import { getSupabaseToken } from "@/lib/supabase-token";
 
 // ---------------------------------------------------------------------------
@@ -91,7 +91,10 @@ export default function TaxesPage() {
     }
   }, [filterActive]);
 
-  useEffect(() => { fetchTaxes(); }, [fetchTaxes]);
+  useEffect(() => {
+    // Start the fetch after the effect returns, so its setState calls don't run synchronously inside the effect.
+    void Promise.resolve().then(() => fetchTaxes());
+  }, [fetchTaxes]);
 
   const stats = useMemo(() => ({
     total: taxes.length,
@@ -117,7 +120,7 @@ export default function TaxesPage() {
               <WifiOff className="size-3" /> Offline
             </span>
           )}
-          <Button variant="outline" size="sm" onClick={fetchTaxes} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={() => { clearApiCache(); void fetchTaxes(); }} disabled={loading}>
             <RefreshCw className={cn("size-3.5", loading && "animate-spin")} /> Refresh
           </Button>
         </div>

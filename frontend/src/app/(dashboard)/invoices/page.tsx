@@ -28,7 +28,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { formatDate } from "@/lib/format";
 import { decimalToMinorUnits, formatMinorUnits } from "@/lib/money";
-import { apiClient, buildQuery, getAllPages } from "@/lib/api-client";
+import { apiClient, buildQuery, clearApiCache, getAllPages } from "@/lib/api-client";
 import { getSupabaseToken } from "@/lib/supabase-token";
 import type {
   ApiCustomer,
@@ -446,7 +446,7 @@ export default function InvoicesPage() {
           <Button variant="outline" size="sm" onClick={() => runBilling("mark-overdue")}>
             Mark overdue
           </Button>
-          <Button variant="outline" size="sm" onClick={fetchInvoices} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={() => { clearApiCache(); void fetchInvoices(); }} disabled={loading}>
             <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
             Refresh
           </Button>

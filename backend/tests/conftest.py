@@ -10,3 +10,15 @@ import os
 
 os.environ.setdefault("SUPABASE_URL", "https://unit-test-project.supabase.co")
 os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "unit-test-service-role-key")
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fresh_auth_cache():
+    """Verified users are cached per token; keep tests independent."""
+    from app.core.current_user import clear_auth_cache
+
+    clear_auth_cache()
+    yield
+    clear_auth_cache()
