@@ -1,7 +1,22 @@
 from supabase import create_client, Client
 from app.core.config import settings
+from typing import Optional
+
+_supabase_client: Optional[Client] = None
 
 def get_supabase() -> Client:
-    return create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
+    global _supabase_client
+    if _supabase_client is not None:
+        return _supabase_client
 
-supabase: Client = get_supabase()
+    url = settings.SUPABASE_URL or "https://placeholder-domain.supabase.co"
+    key = settings.SUPABASE_SERVICE_KEY or "placeholder-key"
+    _supabase_client = create_client(url, key)
+    return _supabase_client
+
+class LazySupabaseProxy:
+    def __getattr__(self, name):
+        client = get_supabase()
+        return getattr(client, name)
+
+supabase: Client = LazySupabaseProxy()
