@@ -39,6 +39,11 @@ class FakeJwkClient:
     def __init__(self, reachable=True):
         self.reachable = reachable
 
+    def get_signing_keys(self):
+        if not self.reachable:
+            raise jwt.PyJWKClientConnectionError("network down")
+        return [type("SigningKey", (), {"key": EC_KEY.public_key(), "key_id": KID})()]
+
     def get_signing_key_from_jwt(self, token):
         if not self.reachable:
             raise jwt.PyJWKClientConnectionError("network down")
@@ -199,6 +204,75 @@ def test_hs256_rejected_when_project_has_no_secret(client, env):
     assert call(client, es256()).status_code == 200
 
 
+# ---------------------------------------------------------------- missing server configuration (503, not 401)
+# These use the real PyJWKClient; only its HTTP fetch is replaced.
+
+def real_jwk_client(monkeypatch, response):
+    client = jwt.PyJWKClient(f"{ISSUER}/.well-known/jwks.json")
+
+    def fetch():
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr(client, "fetch_data", fetch)
+    return client
+
+
+def published_ec_key():
+    jwk = json.loads(jwt.algorithms.ECAlgorithm.to_jwk(EC_KEY.public_key()))
+    return {"keys": [{**jwk, "kid": KID, "use": "sig", "alg": "ES256"}]}
+
+
+def test_hs256_project_without_secret_on_server_is_503(client, env, monkeypatch):
+    """The team lead's case: SUPABASE_URL set (e.g. from .env), no
+    SUPABASE_JWT_SECRET, project signs with HS256 (publishes no keys)."""
+    env.secret = None
+    env.jwk_client = real_jwk_client(monkeypatch, {"keys": []})
+    res = call(client, hs256())
+    assert res.status_code == 503 and "SUPABASE" not in res.text and env.team_calls == 0
+
+
+def test_hs256_forgery_on_asymmetric_project_is_still_401(client, env, monkeypatch):
+    env.secret = None
+    env.jwk_client = real_jwk_client(monkeypatch, published_ec_key())
+    assert call(client, hs256()).status_code == 401
+    assert call(client, es256()).status_code == 200
+
+
+def test_key_server_unreachable_while_checking_hs256_is_503(client, env, monkeypatch):
+    env.secret = None
+    env.jwk_client = real_jwk_client(monkeypatch, jwt.PyJWKClientConnectionError("network down"))
+    assert call(client, hs256()).status_code == 503
+
+
+@pytest.mark.parametrize("make_token", [
+    lambda: hs256(exp=int(time.time()) - 120),                        # expired
+    lambda: jwt.encode(claims(), "wrong-secret-" + "y" * 64, algorithm="HS256"),
+    lambda: hs256(aud="someone-else"),
+])
+def test_configured_server_still_returns_401_for_bad_tokens(client, make_token):
+    assert call(client, make_token()).status_code == 401
+
+
+def test_settings_from_environment_without_secret(repo, monkeypatch):
+    """End to end through the real get_auth_backend: SUPABASE_URL comes from the
+    environment (as a .env file would provide), no JWT secret, HS256 project."""
+    monkeypatch.setenv("SUPABASE_URL", SUPABASE_URL)
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda self: {"keys": []})
+    get_auth_backend.cache_clear()
+    app.dependency_overrides[get_subscription_repository] = lambda: repo
+    try:
+        res = TestClient(app).get("/subscriptions", headers={"Authorization": f"Bearer {hs256()}"})
+        expired = TestClient(app).get("/subscriptions", headers={"Authorization": "Bearer not-a-jwt"})
+    finally:
+        app.dependency_overrides.clear()
+        get_auth_backend.cache_clear()
+    assert res.status_code == 503
+    assert expired.status_code == 401
+
+
 def test_missing_token(client):
     res = client.get("/subscriptions")
     assert res.status_code == 401 and res.headers["www-authenticate"] == "Bearer"
@@ -217,8 +291,9 @@ def test_account_status_lookup_failure_is_503(client, env):
 
 
 def test_unconfigured_server_is_503(repo, monkeypatch):
-    monkeypatch.delenv("SUPABASE_URL", raising=False)
-    monkeypatch.setattr("app.core.supabase_jwt.load_auth_settings", lambda: None)
+    # Patch the name get_auth_backend actually calls (it was imported into
+    # current_user), so a developer's .env file cannot make settings appear.
+    monkeypatch.setattr("app.core.current_user.load_auth_settings", lambda: None)
     get_auth_backend.cache_clear()
     app.dependency_overrides[get_subscription_repository] = lambda: repo
     try:

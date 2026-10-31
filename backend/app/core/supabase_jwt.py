@@ -87,6 +87,11 @@ class SupabaseTokenVerifier:
 
         if algorithm == "HS256":
             if not self.settings.jwt_secret:
+                # Without the secret we can only tell a forgery from a server
+                # misconfiguration by asking which keys the project publishes:
+                # none means the project signs with HS256 and we lack the secret.
+                if not self._project_publishes_signing_keys():
+                    raise AuthUnavailable("SUPABASE_JWT_SECRET is required for this project's HS256 tokens")
                 raise InvalidToken("HS256 tokens are not accepted by this server")
             key = self.settings.jwt_secret
         elif algorithm in ASYMMETRIC_ALGORITHMS:
@@ -113,6 +118,14 @@ class SupabaseTokenVerifier:
         except ValueError as exc:
             raise InvalidToken("Invalid token subject") from exc
         return claims
+
+    def _project_publishes_signing_keys(self) -> bool:
+        try:
+            return bool(self.jwk_client.get_signing_keys())
+        except jwt.PyJWKClientConnectionError as exc:
+            raise AuthUnavailable("Cannot fetch Supabase signing keys") from exc
+        except (jwt.PyJWKClientError, jwt.PyJWKSetError):
+            return False                 # empty key set / no signing keys
 
     def _public_key(self, token: str):
         try:
