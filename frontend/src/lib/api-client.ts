@@ -355,13 +355,12 @@ export async function getAllPages<T>(
   let offset = 0;
 
   while (true) {
-    const pagination = buildQuery({ limit: pageSize, offset });
-    const query = pagination.slice(1);
-    const separator = path.includes("?") ? "&" : "";
-    const { data } = await apiClient.get<T[]>(
-      `${path}${separator}${query}`,
-      options
-    );
+   const pagination = buildQuery({ limit: pageSize, offset });
+const separator = path.includes("?") ? "&" : "";
+const { data } = await apiClient.get<T[]>(
+  `${path}${separator}${path.includes("?") ? pagination.slice(1) : pagination}`,
+  options
+);
     if (!data) throw new ApiError(200, `The ${path} endpoint returned no data.`);
     items.push(...data);
     if (data.length < pageSize) return items;
