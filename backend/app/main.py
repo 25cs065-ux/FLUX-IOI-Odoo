@@ -90,6 +90,12 @@ except ImportError:
     pass
 
 try:
+    from app.routers.products import router as products_router
+    app.include_router(products_router)
+except ImportError:
+    pass
+
+try:
     from app.routers.quotation_templates import router as quotation_templates_router
     app.include_router(quotation_templates_router)
 except ImportError:

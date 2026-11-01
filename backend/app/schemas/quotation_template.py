@@ -1,41 +1,65 @@
-from pydantic import BaseModel, Field, ConfigDict, model_validator
-from typing import List, Optional
+"""Quotation template schemas, matching the live tables:
+
+    quotation_templates      id, name (required), plan_id -> plans.id, validity_days (default 30),
+                             is_active (default true), created_at
+    quotation_template_lines id, template_id -> quotation_templates.id, product_id -> products.id
+                             (required), variant_id -> variants.id, quantity (default 1)
+
+The live tables have no terms-and-conditions column and no per-line price or
+discount, so the API does not accept them: line prices come from the product
+and variant when a quotation is created from the template.
+"""
 from datetime import datetime
+from typing import List, Optional
+from uuid import UUID
 
-class TemplateLineBase(BaseModel):
-    product_id: str = Field(..., description="Target product UUID")
-    variant_id: Optional[str] = Field(None, description="Optional variant UUID")
-    quantity: int = Field(default=1, ge=1, description="Quantity must be at least 1")
-    unit_price: float = Field(..., ge=0.0, description="Unit price cannot be negative")
-    discount_percentage: float = Field(default=0.0, ge=0.0, le=100.0, description="Line discount 0-100%")
+from pydantic import BaseModel, ConfigDict, Field
 
-class TemplateLineCreate(TemplateLineBase):
-    pass
 
-class TemplateLineResponse(TemplateLineBase):
-    id: str
-    template_id: str
+class TemplateLineCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-    model_config = ConfigDict(from_attributes=True)
+    product_id: UUID = Field(..., description="Product on this line")
+    variant_id: Optional[UUID] = Field(None, description="Optional variant of that product")
+    quantity: int = Field(default=1, ge=1, le=100000)
 
-class QuotationTemplateBase(BaseModel):
+
+class TemplateLineResponse(BaseModel):
+    id: UUID
+    template_id: UUID
+    product_id: UUID
+    variant_id: Optional[UUID] = None
+    quantity: int
+    product_name: Optional[str] = None
+    variant_name: Optional[str] = None
+
+
+class QuotationTemplateCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(..., min_length=2, max_length=150, description="Template title")
-    validity_days: int = Field(default=30, ge=1, description="Quote validity period in days")
-    terms_and_conditions: Optional[str] = Field(None, max_length=2000)
+    validity_days: int = Field(default=30, ge=1, le=3650, description="Quote validity period in days")
+    plan_id: Optional[UUID] = Field(None, description="Optional recurring plan the quotation uses")
     is_active: bool = True
+    lines: List[TemplateLineCreate] = Field(default_factory=list, max_length=50,
+                                            description="Preset product lines")
 
-class QuotationTemplateCreate(QuotationTemplateBase):
-    lines: List[TemplateLineCreate] = Field(default=[], description="Preset line items")
 
 class QuotationTemplateUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: Optional[str] = Field(None, min_length=2, max_length=150)
-    validity_days: Optional[int] = Field(None, ge=1)
-    terms_and_conditions: Optional[str] = Field(None, max_length=2000)
+    validity_days: Optional[int] = Field(None, ge=1, le=3650)
+    plan_id: Optional[UUID] = None
     is_active: Optional[bool] = None
 
-class QuotationTemplateResponse(QuotationTemplateBase):
-    id: str
+
+class QuotationTemplateResponse(BaseModel):
+    id: UUID
+    name: str
+    validity_days: int
+    plan_id: Optional[UUID] = None
+    plan_name: Optional[str] = None
+    is_active: bool
     lines: List[TemplateLineResponse] = []
     created_at: Optional[datetime] = None
-
-    model_config = ConfigDict(from_attributes=True)

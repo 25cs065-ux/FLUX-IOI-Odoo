@@ -429,7 +429,10 @@ export async function getAllPages<T>(
     return data;
   }
 
-  const items = await page(0);
+  // Copy: page arrays come from the shared GET cache. Appending to the cached
+  // first page would grow it, and the next call within GET_CACHE_MS would then
+  // return every later row twice.
+  const items = [...(await page(0))];
   if (items.length < limit) return items;
 
   let offset = limit;
