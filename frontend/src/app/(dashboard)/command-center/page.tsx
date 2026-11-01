@@ -263,7 +263,7 @@ function calculateDashboard(
 }
 
 export default function CommandCenterPage() {
-  const [period, setPeriod] = useState<Period>(12);
+  const [period, setPeriod] = useState<Period>(3);
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -353,7 +353,7 @@ export default function CommandCenterPage() {
         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-sm font-semibold text-foreground">Revenue over time</h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">Total revenue, new MRR and churned MRR per month (₹)</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">Monthly collected revenue and new recurring revenue (₹)</p>
           </div>
           <div className="flex gap-1 self-start sm:self-auto">
             {PERIOD_OPTIONS.map((option) => (
@@ -383,8 +383,8 @@ export default function CommandCenterPage() {
               <YAxis yAxisId="newMrr" orientation="right" tick={{ fontSize: 11, fill: "#22c55e" }} axisLine={false} tickLine={false} tickFormatter={(v: number) => formatInrCents(v)} width={72} label={{ value: "New MRR (₹)", angle: 90, position: "insideRight", offset: 0, style: { fontSize: 11, fill: "#22c55e", textAnchor: "middle" } }} />
               <Tooltip content={<RevenueTooltip />} />
               <Legend wrapperStyle={{ fontSize: 11 }} iconType="circle" iconSize={8} />
-              <Area yAxisId="revenue" type="monotone" dataKey="Revenue" stroke="#3b82f6" strokeWidth={2} fill="url(#gradRevenue)" dot={false} activeDot={{ r: 4 }} />
-              <Area yAxisId="newMrr" type="monotone" dataKey="New MRR" stroke="#22c55e" strokeWidth={2} fill="url(#gradNewMrr)" dot={false} activeDot={{ r: 4 }} />
+              <Area yAxisId="revenue" type="linear" dataKey="Revenue" stroke="#3b82f6" strokeWidth={2} fill="url(#gradRevenue)" dot={false} activeDot={{ r: 4 }} />
+              <Area yAxisId="newMrr" type="linear" dataKey="New MRR" stroke="#22c55e" strokeWidth={2} fill="url(#gradNewMrr)" dot={false} activeDot={{ r: 4 }} />
             </AreaChart>
           </ResponsiveContainer>
           {revenueNotice && (
