@@ -8,6 +8,8 @@ import Link from "next/link";
 import { FormField } from "@/components/shared/FormField";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/lib/supabase";
+import { clearApiCache } from "@/lib/api-client";
+import { fetchCurrentUser, postLoginPath } from "@/lib/current-user";
 import { loginSchema, type LoginForm } from "@/lib/validators";
 
 // ---------------------------------------------------------------------------
@@ -42,8 +44,19 @@ export default function LoginPage() {
       return;
     }
 
-    // Redirect to dashboard. The proxy will enforce role from there.
-    router.replace("/command-center");
+    // Route by role: customers to the portal, admin and staff to the
+    // dashboard, or back to the page they asked for when their role may open it.
+    clearApiCache();
+    try {
+      const user = await fetchCurrentUser();
+      const next = new URLSearchParams(window.location.search).get("next");
+      router.replace(postLoginPath(user.role, next));
+    } catch (err) {
+      await supabase.auth.signOut();
+      setServerError(
+        err instanceof Error ? `Signed in, but your account could not be loaded: ${err.message}` : "Your account could not be loaded."
+      );
+    }
   }
 
   return (

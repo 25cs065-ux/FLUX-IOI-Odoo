@@ -5,8 +5,8 @@ import { PortalLayoutShell } from "@/components/layout/PortalLayoutShell";
  * All pages under (portal)/portal/ automatically receive
  * the PortalLayoutShell. No admin navigation is exposed here.
  *
- * Supabase Auth session checking will be added in a later task.
- * For now, all portal pages are accessible with the demo customer.
+ * PortalLayoutShell's RoleGuard admits customers only; admin and staff are
+ * sent to the dashboard. Data is scoped to the customer by the backend.
  */
 export default function PortalLayout({
   children,

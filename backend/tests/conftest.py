@@ -17,8 +17,11 @@ import pytest  # noqa: E402
 @pytest.fixture(autouse=True)
 def _fresh_auth_cache():
     """Verified users are cached per token; keep tests independent."""
+    from app.core.auth import clear_user_cache
     from app.core.current_user import clear_auth_cache
 
     clear_auth_cache()
+    clear_user_cache()
     yield
     clear_auth_cache()
+    clear_user_cache()

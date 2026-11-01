@@ -403,9 +403,16 @@ function maxPageSize(path: string): number {
   return MAX_PAGE_SIZE.find(([prefix]) => path.startsWith(prefix))?.[1] ?? DEFAULT_MAX_PAGE_SIZE;
 }
 
+// Pages requested at the same time once a list turns out to need more than one.
+const PAGE_CONCURRENCY = 4;
+
 /**
  * Fetch every page of a list endpoint. `pageSize` is capped at the endpoint's
  * maximum, so callers can never trigger the backend's 422 for an oversized limit.
+ *
+ * The first page is fetched alone (most lists fit in it). Larger lists are then
+ * fetched PAGE_CONCURRENCY pages at a time, so 1,200 customers take 4 round
+ * trips instead of 13 one after another.
  */
 export async function getAllPages<T>(
   path: string,
@@ -413,16 +420,29 @@ export async function getAllPages<T>(
   options?: RequestOptions
 ): Promise<T[]> {
   const limit = Math.min(pageSize, maxPageSize(path));
-  const items: T[] = [];
-  let offset = 0;
 
-  while (true) {
+  async function page(offset: number): Promise<T[]> {
     const pagination = buildQuery({ limit, offset });
     const url = path.includes("?") ? `${path}&${pagination.slice(1)}` : `${path}${pagination}`;
     const { data } = await apiClient.get<T[]>(url, options);
     if (!data) throw new ApiError(200, `The ${path} endpoint returned no data.`);
-    items.push(...data);
-    if (data.length < limit) return items;
-    offset += limit;
+    return data;
+  }
+
+  // Copy: page arrays come from the shared GET cache. Appending to the cached
+  // first page would grow it, and the next call within GET_CACHE_MS would then
+  // return every later row twice.
+  const items = [...(await page(0))];
+  if (items.length < limit) return items;
+
+  let offset = limit;
+  while (true) {
+    const offsets = Array.from({ length: PAGE_CONCURRENCY }, (_, i) => offset + i * limit);
+    const pages = await Promise.all(offsets.map(page));
+    for (const data of pages) {
+      items.push(...data);
+      if (data.length < limit) return items;
+    }
+    offset += PAGE_CONCURRENCY * limit;
   }
 }

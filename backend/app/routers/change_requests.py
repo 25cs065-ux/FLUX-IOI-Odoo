@@ -1,87 +1,132 @@
-from fastapi import APIRouter, HTTPException, Depends, status
-from typing import List, Optional
-from datetime import datetime, timezone
+"""Change requests API (a customer asks for a change to a subscription).
 
+RBAC
+  admin, staff : list/read every request, create one on behalf of a customer
+  admin        : change a request's status
+  customer     : create, list and read their own requests only (others return 404)
+"""
+from datetime import datetime, timezone
+from typing import List, Optional
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+
+from app.core.current_user import CurrentUser, Role, require_roles
+from app.repositories.change_request_repository import (
+    ChangeRequestRepository,
+    get_change_request_repository,
+)
 from app.schemas.change_request import (
+    TERMINAL_STATUSES,
     ChangeRequestCreate,
-    ChangeRequestUpdate,
     ChangeRequestResponse,
     ChangeRequestStatus,
-    TERMINAL_STATUSES
+    ChangeRequestUpdate,
 )
-from app.core.supabase import supabase
-from app.core.auth import get_current_user, require_admin
 
 router = APIRouter(prefix="/change-requests", tags=["Change Requests"])
+
+any_role = require_roles(Role.ADMIN, Role.STAFF, Role.CUSTOMER)
+admin_only = require_roles(Role.ADMIN)
+
+NOT_FOUND = "Change request not found"
+
+
+def _own_customer_id(repo: ChangeRequestRepository, user: CurrentUser) -> Optional[str]:
+    customer = repo.get_customer_by_auth_user(user.id)
+    return str(customer["id"]) if customer else None
+
+
+def _visible_request(repo: ChangeRequestRepository, request_id: UUID, user: CurrentUser) -> dict:
+    record = repo.get_request(request_id)
+    if not record or (user.role == Role.CUSTOMER
+                      and str(record["customer_id"]) != _own_customer_id(repo, user)):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND)
+    return record
+
 
 @router.post("/", response_model=ChangeRequestResponse, status_code=status.HTTP_201_CREATED)
 def create_change_request(
     payload: ChangeRequestCreate,
-    current_user: dict = Depends(get_current_user)
+    user: CurrentUser = Depends(any_role),
+    repo: ChangeRequestRepository = Depends(get_change_request_repository),
 ):
-    data = payload.model_dump(mode="json")
-    data["requested_by"] = current_user["id"]
-    data["status"] = ChangeRequestStatus.PENDING.value
-    data["created_at"] = datetime.now(timezone.utc).isoformat()
-    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    if user.role == Role.CUSTOMER:
+        customer_id = _own_customer_id(repo, user)
+        if customer_id is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                                detail="Your account is not linked to a customer record")
+    else:
+        if payload.customer_id is None:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                detail="customer_id is required")
+        customer = repo.get_customer(payload.customer_id)
+        if not customer or customer.get("is_active") is False:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                detail="Customer not found or inactive")
+        customer_id = str(customer["id"])
 
-    res = supabase.table("change_requests").insert(data).execute()
-    if not res.data:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to create change request")
-    return ChangeRequestResponse(**res.data[0])
+    if payload.subscription_id is not None:
+        sub = repo.get_subscription(payload.subscription_id)
+        if not sub or str(sub["customer_id"]) != customer_id:
+            # Same answer whether it is missing or someone else's.
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                detail="Subscription not found for this customer")
+
+    return repo.insert_request({
+        "customer_id": customer_id,
+        "subscription_id": payload.subscription_id,
+        "request_type": payload.request_type.value,
+        "details": payload.details,
+        "status": ChangeRequestStatus.PENDING.value,
+    })
+
 
 @router.get("/", response_model=List[ChangeRequestResponse])
-def list_change_requests(current_user: dict = Depends(get_current_user)):
-    query = supabase.table("change_requests").select("*")
-    if current_user.get("role") != "admin":
-        query = query.eq("requested_by", current_user["id"])
-    
-    res = query.order("created_at", desc=True).execute()
-    return [ChangeRequestResponse(**item) for item in (res.data or [])]
+def list_change_requests(
+    status_filter: Optional[ChangeRequestStatus] = Query(None, alias="status"),
+    customer_id: Optional[UUID] = Query(None, description="Ignored for customers (always their own)"),
+    subscription_id: Optional[UUID] = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    user: CurrentUser = Depends(any_role),
+    repo: ChangeRequestRepository = Depends(get_change_request_repository),
+):
+    if user.role == Role.CUSTOMER:
+        customer_id = _own_customer_id(repo, user)
+        if customer_id is None:
+            return []
+    return repo.list_requests(customer_id=customer_id, subscription_id=subscription_id,
+                              status=status_filter.value if status_filter else None,
+                              limit=limit, offset=offset)
+
 
 @router.get("/{request_id}", response_model=ChangeRequestResponse)
 def get_change_request(
-    request_id: str,
-    current_user: dict = Depends(get_current_user)
+    request_id: UUID,
+    user: CurrentUser = Depends(any_role),
+    repo: ChangeRequestRepository = Depends(get_change_request_repository),
 ):
-    res = supabase.table("change_requests").select("*").eq("id", request_id).execute()
-    if not res.data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Change request not found")
+    return _visible_request(repo, request_id, user)
 
-    record = res.data[0]
-    if current_user.get("role") != "admin" and record.get("requested_by") != current_user["id"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
-
-    return ChangeRequestResponse(**record)
 
 @router.patch("/{request_id}", response_model=ChangeRequestResponse)
 def update_change_request_status(
-    request_id: str,
+    request_id: UUID,
     payload: ChangeRequestUpdate,
-    admin_user: dict = Depends(require_admin)
+    user: CurrentUser = Depends(admin_only),
+    repo: ChangeRequestRepository = Depends(get_change_request_repository),
 ):
-    current = supabase.table("change_requests").select("*").eq("id", request_id).execute()
-    if not current.data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Change request not found")
-
-    existing = current.data[0]
-    curr_status = existing.get("status")
-
-    if curr_status in TERMINAL_STATUSES:
+    existing = _visible_request(repo, request_id, user)
+    if existing.get("status") in TERMINAL_STATUSES:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Cannot modify change request already in terminal status '{curr_status}'"
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot modify a change request that is already '{existing.get('status')}'",
         )
-
-    update_data = payload.model_dump(exclude_unset=True, mode="json")
-    if not update_data:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields provided to update")
-
-    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
-    update_data["reviewed_by"] = admin_user["id"]
-
-    res = supabase.table("change_requests").update(update_data).eq("id", request_id).execute()
-    if not res.data:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to update change request")
-
-    return ChangeRequestResponse(**res.data[0])
+    updated = repo.update_request(request_id, {
+        "status": payload.status.value,
+        "updated_at": datetime.now(timezone.utc),
+    })
+    if not updated:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND)
+    return updated

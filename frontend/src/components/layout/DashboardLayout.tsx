@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Sidebar } from "./Sidebar";
 import { TopNavbar } from "./TopNavbar";
+import { RoleGuard } from "./RoleGuard";
 
 interface DashboardLayoutProps {
   children: React.ReactNode;
@@ -24,6 +25,7 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   return (
+    <RoleGuard>
     <div className="flex h-screen overflow-hidden bg-background">
       <Sidebar
         collapsed={collapsed}
@@ -41,5 +43,6 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
         </main>
       </div>
     </div>
+    </RoleGuard>
   );
 }

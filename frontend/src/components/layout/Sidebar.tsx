@@ -5,7 +5,7 @@ import Link from "next/link";
 import { LogOut, ChevronLeft, ChevronRight, Menu, X } from "lucide-react";
 import { cn } from "cn";
 import { NAV_ITEMS } from "@/lib/navigation";
-import { supabase } from "@/lib/supabase";
+import { signOut } from "./RoleGuard";
 
 interface SidebarProps {
   collapsed: boolean;
@@ -24,8 +24,7 @@ export function Sidebar({
   const router = useRouter();
 
   async function handleLogout() {
-    await supabase.auth.signOut();
-    router.replace("/login");
+    await signOut(router);
   }
 
   const sidebarContent = (

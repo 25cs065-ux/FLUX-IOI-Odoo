@@ -5,13 +5,9 @@ import { Bell } from "lucide-react";
 import { cn } from "cn";
 import { NAV_ITEMS } from "@/lib/navigation";
 import { MobileMenuButton } from "./Sidebar";
+import { useSignedInUser } from "./RoleGuard";
+import { initialsFor, ROLE_LABELS } from "@/lib/current-user";
 
-/** Placeholder user — replace with real auth context when available. */
-const PLACEHOLDER_USER = {
-  name: "Alex Johnson",
-  role: "Admin", // placeholder role — real role-based logic added later
-  initials: "AJ",
-};
 
 interface TopNavbarProps {
   onMobileMenuOpen: () => void;
@@ -48,11 +44,6 @@ export function TopNavbar({ onMobileMenuOpen }: TopNavbarProps) {
           className="relative flex items-center justify-center rounded-md p-1.5 text-foreground/60 hover:bg-muted hover:text-foreground transition-colors"
         >
           <Bell className="size-5" />
-          {/* Notification badge — placeholder */}
-          <span
-            aria-hidden="true"
-            className="absolute right-1 top-1 size-1.5 rounded-full bg-destructive"
-          />
         </button>
 
         {/* User menu */}
@@ -62,12 +53,16 @@ export function TopNavbar({ onMobileMenuOpen }: TopNavbarProps) {
   );
 }
 
-/** Minimal user avatar + dropdown placeholder. */
+/** The signed-in user's avatar, name and role. */
 function UserMenu() {
+  const user = useSignedInUser();
+  if (!user) return null;
+  const name = user.name || user.email || "Signed in";
+
   return (
     <div className="relative">
       <button
-        aria-label={`User menu — ${PLACEHOLDER_USER.name}`}
+        aria-label={`Signed in as ${name}`}
         className="flex items-center gap-2 rounded-md px-2 py-1 text-sm text-foreground hover:bg-muted transition-colors"
       >
         {/* Avatar initials */}
@@ -78,13 +73,13 @@ function UserMenu() {
           )}
           aria-hidden="true"
         >
-          {PLACEHOLDER_USER.initials}
+          {initialsFor(user)}
         </span>
         {/* Name + role on md+ */}
         <span className="hidden md:flex flex-col items-start leading-tight">
-          <span className="font-medium">{PLACEHOLDER_USER.name}</span>
+          <span className="max-w-[200px] truncate font-medium">{name}</span>
           <span className="text-xs text-muted-foreground">
-            {PLACEHOLDER_USER.role}
+            {ROLE_LABELS[user.role]}
           </span>
         </span>
       </button>

@@ -1,3 +1,7 @@
+import threading
+import time
+from collections import OrderedDict
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.core.supabase import supabase
@@ -5,8 +9,38 @@ from typing import Dict, Any
 
 security = HTTPBearer()
 
+# A page load sends many API calls with the same token. Remember each resolved
+# user for a short time so they do not all repeat the Supabase Auth round trip
+# and the customers lookup. Failures are never cached; role changes apply
+# within USER_CACHE_SECONDS.
+USER_CACHE_SECONDS = 30
+_USER_CACHE_MAX = 1024
+_user_cache: "OrderedDict[str, tuple[float, Dict[str, Any]]]" = OrderedDict()
+_user_cache_lock = threading.Lock()
+
+
+def clear_user_cache() -> None:
+    with _user_cache_lock:
+        _user_cache.clear()
+
+
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> Dict[str, Any]:
     token = credentials.credentials
+    with _user_cache_lock:
+        entry = _user_cache.get(token)
+        if entry and entry[0] > time.time():
+            return dict(entry[1])
+        _user_cache.pop(token, None)
+
+    user = _resolve_user(token)
+    with _user_cache_lock:
+        _user_cache[token] = (time.time() + USER_CACHE_SECONDS, user)
+        while len(_user_cache) > _USER_CACHE_MAX:
+            _user_cache.popitem(last=False)
+    return dict(user)
+
+
+def _resolve_user(token: str) -> Dict[str, Any]:
     try:
         user_res = supabase.auth.get_user(token)
         if not user_res or not user_res.user:

@@ -22,6 +22,10 @@ class CustomerUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 class CustomerResponse(CustomerBase):
+    # Stored emails are returned as-is: create/update still validate with
+    # EmailStr, but one legacy address (e.g. a reserved .test domain) must not
+    # make a whole customers list fail with a 500.
+    email: str
     id: str
     role: str
     is_active: bool
